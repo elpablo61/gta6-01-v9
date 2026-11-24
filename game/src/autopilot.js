@@ -838,7 +838,12 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
     return;
   }
 
-  if (Math.abs(diff) > 1.2 && Math.abs(speed) < 70) {
+  // Rotate in place when slow and the nose is well off the aim
+  // (> ~52 degrees): arcing at low speed just grinds the car
+  // sideways, and going full throttle from here drove it off the
+  // road in probe #2. At speed the turn-coast branch below takes
+  // over instead, so this never stops a fast car.
+  if (Math.abs(diff) > 0.9 && Math.abs(speed) < 70) {
     keys.release('KeyW');
     keys.release('KeyS');
     steerToward(keys, diff);
@@ -846,11 +851,17 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
     // instead: reversing while steering turns the nose the same way,
     // so the car backs out of the block while still rotating toward
     // the target, instead of grinding against the wall forever.
-    // Face mode (parked at an ambush corner) never creeps: the car
-    // must stay on the corner, nose turning, wheels still.
-    if (Math.abs(speed) < 25 && !faceOnly) {
+    // Face mode creeps too, with W only: steering with no throttle
+    // does NOT rotate this car at a standstill — probes #1 and #2
+    // both watched a parked car hold its steer key for 5s with the
+    // angle frozen, facing the wrong way while the courier drove
+    // past. The W creep is what turns the nose; it stops the moment
+    // the car faces the aim (face-hold below), so the car stays on
+    // the ambush. Never reverse in face mode: backing out would
+    // leave the corner.
+    if (Math.abs(speed) < 25) {
       if (noseClear(G, p, heading)) keys.hold('KeyW');
-      else keys.hold('KeyS');
+      else if (!faceOnly) keys.hold('KeyS');
     }
     state.dbgDrive = faceOnly ? 'face-rotate' : 'rotate';
     return;
@@ -900,6 +911,17 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
     keys.release('KeyW');
     keys.release('KeyS');
     state.dbgDrive = 'brake-cap';
+  } else if (Math.abs(diff) > 0.9) {
+    // Don't accelerate off-course: leaving the rotate branch ~54
+    // degrees off the aim and going full throttle drove the car off
+    // the road in probe #2 (t=10-11: 0 to 102 u/s heading
+    // north-west, off the road in a second). Coast on drag while
+    // the steering brings the nose around; throttle resumes once
+    // roughly aligned. Only reachable at speed now — below 70 the
+    // rotate branch above already took the frame.
+    keys.release('KeyW');
+    keys.release('KeyS');
+    state.dbgDrive = 'turn-coast';
   } else {
     keys.hold('KeyW');
     keys.release('KeyS');
