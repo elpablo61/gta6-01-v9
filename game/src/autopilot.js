@@ -1002,11 +1002,15 @@ function nearestRoadPointOf(G, p) {
 // the courier cutting corners — it never collides). A junction is
 // winnable when courierETA - playerETA >= 3s; among winnable
 // junctions the nearest wins, otherwise the widest margin wins. The
-// pick is STICKY: it survives while the courier stays on the same
-// leg, the junction is still ahead of it, and the player can still
-// arrive first (or is already parked), for at most 20s — so the car
-// never chases a new junction every frame. Picks are recomputed at
-// most once every 2s.
+// pick is STICKY: it survives while the junction is still ahead of
+// the courier and the player is not more than 5s late (or is already
+// parked), for at most 20s — so the car commits to one ambush
+// instead of chasing a new junction every frame. The 5s late
+// tolerance is the point: arriving just behind the courier on its
+// own route is a tail position, while abandoning a pick the moment
+// its margin goes negative made the car oscillate between the ends
+// of one road for the whole arc (m2 never completed). Picks are
+// recomputed at most once every 2s.
 
 function courierLegKey(courier) {
   if (typeof courier.destX === 'number' && typeof courier.destY === 'number') {
@@ -1079,9 +1083,15 @@ function pickIntercept(G, state, courier, courierPos, p) {
   const cached = state.chaseIntercept;
   const route = Array.isArray(courier.route) ? courier.route : [];
   const pts = route.map(posOf).filter(Boolean);
-  // Sticky: keep the pick while the leg, the junction-ahead and the
-  // winnable-or-parked conditions all still hold, max 20s.
-  if (cached && cached.legKey === legKey && now - cached.pickedAt < 20) {
+  // Sticky: keep the pick while the junction is still ahead of the
+  // courier and the player is not more than 5s late (or is parked),
+  // max 20s. Keyed by the junction, not the leg: a leg change must
+  // not break the stick while the courier is still heading for the
+  // same junction — only a junction the courier already passed
+  // breaks it. Committing matters more than winning by seconds:
+  // abandoning a pick the moment its margin went negative made the
+  // car oscillate between the ends of one road for the whole arc.
+  if (cached && now - cached.pickedAt < 20) {
     const junction = { x: cached.x, y: cached.y };
     const roadD = roadDistToJunction(courierPos, route, junction);
     // Junction behind the courier (route known) breaks the stick.
@@ -1090,7 +1100,7 @@ function pickIntercept(G, state, courier, courierPos, p) {
       const cETA = cDist / (cruise * 1.15);
       const pETA = 1.3 * dist(p.x, p.y, junction.x, junction.y) / 300;
       const parked = dist(p.x, p.y, cached.parkX, cached.parkY) < 70;
-      if (cETA > 0.5 && (parked || pETA + 1 < cETA)) return cached;
+      if (cETA > 0.5 && (parked || pETA < cETA + 5)) return cached;
     }
   }
   // Recompute at most once every 2s.
