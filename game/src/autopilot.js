@@ -734,10 +734,17 @@ function routeDistance(from, points) {
 }
 
 // The soonest junction ahead on the courier's own route that the
-// player can reach no later than ~1.2s after the courier. Returns null
-// when no junction on the current leg is reachable in time — the
-// caller then falls back to tailing the predicted position rather
-// than driving to a junction the courier left long ago.
+// player can reach no later than the courier. Scan the WHOLE route,
+// not just the first few junctions: the reachable meeting is often
+// far along it — the player's cross-map road route to a distant
+// junction can be shorter in time than the courier's zigzag to the
+// near ones (the probe watched the player trail the courier's route
+// a leg behind for minutes because the scan stopped at 6 junctions
+// while the meeting sat at the 8th, gap -0.3s). The player's time
+// is estimated at 75% of top speed: the raw top-speed figure ignores
+// every junction slowdown, and an "on time" estimate that is really
+// two seconds late is how the ambush kept arriving after the courier
+// had already left it.
 function pickIntercept(G, state, courier, courierPos, playerPos, playerTop) {
   const route = courier && Array.isArray(courier.route) ? courier.route : null;
   if (!route || route.length < 2) return null;
@@ -746,18 +753,27 @@ function pickIntercept(G, state, courier, courierPos, playerPos, playerTop) {
   // much sooner. Floor the estimate at 250 so the ambush is not picked
   // a junction too near.
   const courierSpeed = Math.max(250, speedOf(courier));
+  const ourSpeed = Math.max(60, playerTop * 0.75);
   let courierRun = dist(courierPos.x, courierPos.y, route[0].x, route[0].y);
-  const lastK = Math.min(route.length - 1, 6);
-  for (let k = 1; k <= lastK; k += 1) {
+  let best = null;
+  let bestGap = Infinity;
+  for (let k = 1; k <= route.length - 1; k += 1) {
     const wp = posOf(route[k]);
     if (!wp) continue;
     courierRun += dist(route[k - 1].x, route[k - 1].y, wp.x, wp.y);
     const courierTime = courierRun / courierSpeed;
     const ourRoute = computeRoute(G, playerPos, wp);
-    const ourTime = routeDistance(playerPos, ourRoute) / Math.max(60, playerTop);
-    if (ourTime - courierTime <= 1.2) return { x: wp.x, y: wp.y };
+    const ourTime = routeDistance(playerPos, ourRoute) / ourSpeed;
+    const gap = ourTime - courierTime;
+    if (gap <= 0) return { x: wp.x, y: wp.y };
+    if (gap < bestGap) { bestGap = gap; best = { x: wp.x, y: wp.y }; }
   }
-  return null;
+  // No junction is reachable on time: take the least-late one when it
+  // is close (within 3s) rather than trailing the route from behind —
+  // arriving just after the courier still puts the player on its tail
+  // on the same road. Otherwise return null and let the caller join
+  // the route at its nearest point.
+  return bestGap <= 3 ? best : null;
 }
 
 // Is the point 55 units ahead of the car open ground? The m2 start
@@ -826,8 +842,15 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
     const outAngle = Math.atan2(next.y - wp.y, next.x - wp.x);
     const turn = Math.abs(angleDiff(outAngle, inAngle));
     const wpDist = (opts && opts.waypointDist) || 0;
-    if (turn > 1.5 && wpDist < 320) cap = Math.min(cap, 200);
-    else if (turn > 0.9 && wpDist < 300) cap = Math.min(cap, 290);
+    // Brake early and hard for sharp junction turns: the turning
+    // radius at 200 u/s is ~91 units, wider than the 64-wide road,
+    // so the car overshoots the junction, grinds a building face and
+    // drops to ~7 u/s (the probe watched exactly that at (200,1000)).
+    // At 110 the radius is ~46 and the car turns inside the junction
+    // instead of past it; the courier is capped the same way, so the
+    // chase loses seconds at a turn rather than ten.
+    if (turn > 1.5 && wpDist < 400) cap = Math.min(cap, 110);
+    else if (turn > 0.9 && wpDist < 350) cap = Math.min(cap, 180);
   }
   if (mag > cap) {
     keys.release('KeyW');
@@ -843,19 +866,27 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
 // rotate-in-place fixes that: creeping while rotating grinds the car
 // against the nearest building, and driving forward at a large
 // steering angle arcs it deeper into the block. Recover to the road
-// first: drive forward only when the nearest road point is almost
-// straight ahead; otherwise reverse straight toward it, steering by
-// the rear's heading (the rear swings the way the nose turns, so the
-// car backs out of the block onto the road instead of turning in it).
-function recoverToRoad(G, state, p, heading) {
+// first: drive forward only when the road point is almost straight
+// ahead; otherwise reverse straight toward it, steering by the rear's
+// heading (the rear swings the way the nose turns, so the car backs
+// out of the block onto the road instead of turning in it).
+// The target is the last on-road point the car actually drove through
+// (a breadcrumb), not the geometrically nearest road point: the
+// nearest point can sit behind a building — the probe watched the car
+// spend 200+ seconds oscillating in the NW corner block aiming at a
+// road point it could never reach — while the breadcrumb is the exit
+// the car just used, open by construction.
+function recoverToRoad(G, state, p, heading, target) {
   const world = G.world || {};
-  const nearest = world.nearestRoadPoint || world.nearestRoad || world.snapToRoad;
-  if (typeof nearest !== 'function') return false;
-  let roadPoint = null;
-  try {
-    const raw = nearest.call(world, p.x, p.y);
-    roadPoint = posOf(raw) || (Array.isArray(raw) ? { x: raw[0], y: raw[1] } : null);
-  } catch { roadPoint = null; }
+  let roadPoint = target || null;
+  if (!roadPoint) {
+    const nearest = world.nearestRoadPoint || world.nearestRoad || world.snapToRoad;
+    if (typeof nearest !== 'function') return false;
+    try {
+      const raw = nearest.call(world, p.x, p.y);
+      roadPoint = posOf(raw) || (Array.isArray(raw) ? { x: raw[0], y: raw[1] } : null);
+    } catch { roadPoint = null; }
+  }
   if (!roadPoint) return false;
   const keys = state.keys;
   const desired = Math.atan2(roadPoint.y - p.y, roadPoint.x - p.x);
@@ -907,14 +938,42 @@ function driveChase(G, state, courier, courierPos) {
   // Off-road recovery first: the m1 exit often leaves the car inside a
   // block, and every bit of chase logic below assumes road driving.
   // Skip it when the courier is point-blank — a ram in progress
-  // outranks getting back on the asphalt.
+  // outranks getting back on the asphalt. Keep a breadcrumb trail of
+  // on-road points (one every half second, eight deep) so the recovery
+  // aims at the exit the car actually used, not the nearest road point
+  // behind a building.
   if (dCourier > 250) {
     const world = G.world || {};
     if (typeof world.isOnRoad === 'function') {
       let onRoad = true;
       try { onRoad = world.isOnRoad(p.x, p.y); } catch { onRoad = true; }
-      if (!onRoad && recoverToRoad(G, state, p, heading)) return true;
+      if (onRoad) {
+        if (!state.roadTrail) state.roadTrail = [];
+        const last = state.roadTrail[state.roadTrail.length - 1];
+        if (!last || now - (last.t || 0) >= 0.5) {
+          state.roadTrail.push({ x: p.x, y: p.y, t: now });
+          if (state.roadTrail.length > 8) state.roadTrail.shift();
+        }
+      } else {
+        const trail = state.roadTrail || [];
+        const exit = trail.length > 0 ? trail[trail.length - 1] : null;
+        const target = exit && dist(p.x, p.y, exit.x, exit.y) > 40 ? exit : null;
+        if (recoverToRoad(G, state, p, heading, target)) return true;
+      }
     }
+  }
+
+  // Opening sprint: in the first seconds the courier is still
+  // accelerating from a standstill (it spawns 500 away), so the player
+  // is genuinely faster and the meeting is right there. Drive straight
+  // at it — the intercept logic would send the car the other way
+  // toward a far junction while the free hit drives past (the probe
+  // watched the player turn west to an ambush while the courier, at
+  // 160 u/s and 500 away, came east through the player's position).
+  if (now - state.chaseStartAt < 5 && dCourier < 700) {
+    const aimOpen = predictPosition(courier, courierPos, p, playerTop);
+    steerAndThrottle(G, state, aimOpen, playerTop, speed, heading, { direct: true });
+    return true;
   }
 
   // A courier slowed by two or more hits crawls (under ~150 u/s): no
@@ -1007,14 +1066,19 @@ function driveChase(G, state, courier, courierPos) {
     const wpDist = dist(p.x, p.y, wp.x, wp.y);
     const wpAngle = Math.atan2(wp.y - p.y, wp.x - p.x);
     const nextAngle = Math.atan2(next.y - p.y, next.x - p.x);
-    if (wpDist < 50
+    // Reach the junction before turning: the old 55-unit acceptance
+    // radius let the car swing toward the next waypoint while still
+    // 55 short of the junction — outside the 64-wide road, across a
+    // block corner into buildings. At 30 the car is inside the
+    // junction (road half-width 32) when the turn starts.
+    if (wpDist < 30
       || (Math.abs(angleDiff(wpAngle, heading)) > 2.0
         && Math.abs(angleDiff(nextAngle, heading)) < 1.2)) state.chaseRoute.shift();
     else break;
   }
   while (state.chaseRoute.length > 0) {
     const wp = state.chaseRoute[0];
-    if (dist(p.x, p.y, wp.x, wp.y) < 55) state.chaseRoute.shift();
+    if (dist(p.x, p.y, wp.x, wp.y) < 30) state.chaseRoute.shift();
     else break;
   }
   const waypoint = state.chaseRoute[0] || aimPoint;
