@@ -11,6 +11,33 @@ const MOVE_KEYS = {
   KeyD: 'right', ArrowRight: 'right',
 };
 
+// One place that keeps every view of a key in step: the live Set of
+// held codes (what player / weapons / garage / missions read via
+// input.keys and input.isDown), the directional aliases, and the action
+// flags. A key that only updates the aliases is invisible to the
+// modules that read the Set — that was the old shape, and no key was
+// ever seen in the browser.
+function syncKey(input, code, down) {
+  if (down) input.keys.add(code);
+  else input.keys.delete(code);
+  const dir = MOVE_KEYS[code];
+  if (dir) input[dir] = down;
+  if (code === 'ShiftLeft' || code === 'ShiftRight') input.sprint = down;
+  if (code === 'KeyE') input.interact = down;
+  if (code === 'KeyR') input.radio = down;
+  if (code === 'KeyQ') input.switchWeapon = down;
+}
+
+// One place that keeps every view of the mouse in step: the flat
+// canvas-pixel fields and the grouped mouse object (player aim/shoot
+// and combat read input.mouse; other code reads mouseX/mouseY).
+function syncMousePos(input, clientX, clientY, rect) {
+  input.mouseX = clientX - rect.left;
+  input.mouseY = clientY - rect.top;
+  input.mouse.x = input.mouseX;
+  input.mouse.y = input.mouseY;
+}
+
 export function createInput() {
   return {
     // Held movement directions.
@@ -20,16 +47,10 @@ export function createInput() {
     interact: false,    // E (held)
     radio: false,       // R (held)
     switchWeapon: false,// Q (held)
-    // Live set of held KeyboardEvent.code values, kept in sync by the
-    // listeners below. This is the shape the game modules read
-    // (player / weapons / garage / missions all read input.keys or
-    // input.isDown); without it, no module could ever see a key in
-    // the browser, because the directional aliases alone are not
-    // what their key readers check.
+    // Live set of held KeyboardEvent.code values (see syncKey).
     keys: new Set(),
-    // Mouse in canvas pixels, kept in sync by the listeners below.
-    // Modules read input.mouse (player aim/shoot, combat) as well as
-    // the flat mouseX / mouseY / mouseDown fields.
+    // Mouse in canvas pixels (see syncMousePos): position, held state,
+    // and a clicked edge that endFrame() clears each frame.
     mouse: { x: 0, y: 0, down: false, clicked: false },
     isDown(code) { return this.keys.has(code); },
     // Mouse aim, in canvas pixels (updated by mousemove).
@@ -60,13 +81,8 @@ export function createInput() {
 export function initInput(input, canvas) {
   function onKeyDown(e) {
     if (e.repeat) return;
-    input.keys.add(e.code);
-    const dir = MOVE_KEYS[e.code];
-    if (dir) { input[dir] = true; e.preventDefault(); }
-    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') input.sprint = true;
-    if (e.code === 'KeyE') input.interact = true;
-    if (e.code === 'KeyR') input.radio = true;
-    if (e.code === 'KeyQ') input.switchWeapon = true;
+    syncKey(input, e.code, true);
+    if (MOVE_KEYS[e.code]) e.preventDefault();
     // Edge presses: E / R / Q / digits / Escape / P / Enter / Space / M.
     input._pressed.add(e.code);
     if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
@@ -74,20 +90,10 @@ export function initInput(input, canvas) {
     }
   }
   function onKeyUp(e) {
-    input.keys.delete(e.code);
-    const dir = MOVE_KEYS[e.code];
-    if (dir) input[dir] = false;
-    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') input.sprint = false;
-    if (e.code === 'KeyE') input.interact = false;
-    if (e.code === 'KeyR') input.radio = false;
-    if (e.code === 'KeyQ') input.switchWeapon = false;
+    syncKey(input, e.code, false);
   }
   function onMouseMove(e) {
-    const rect = canvas.getBoundingClientRect();
-    input.mouseX = e.clientX - rect.left;
-    input.mouseY = e.clientY - rect.top;
-    input.mouse.x = input.mouseX;
-    input.mouse.y = input.mouseY;
+    syncMousePos(input, e.clientX, e.clientY, canvas.getBoundingClientRect());
   }
   function onMouseDown(e) {
     if (e.button === 0) {

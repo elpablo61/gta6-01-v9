@@ -81,59 +81,56 @@ function speedOf(G) {
 
 const WEAPON_DISPLAY_NAMES = { pistol: 'Pistol', smg: 'SMG', shotgun: 'Shotgun' };
 
+// What the HUD prints for the current weapon. The weapons module keeps
+// the current weapon as a plain string id and the ammo in a map keyed
+// by that id — so the display is a lookup, not a property read off the
+// id itself (reading .name/.ammo off a string yields the same 'Pistol
+// • 0' for every weapon). An object-shaped current (older saves, tests)
+// still resolves through its own name/ammo fields.
 function weaponInfo(G) {
   const w = G.weapons || {};
   const cur = w.current || w.active || null;
-  // The live shape: current is a STRING id ('pistol' / 'smg' /
-  // 'shotgun') and ammo lives in the w.ammo map. The old code read
-  // cur.name / cur.ammo off the string, so the HUD always showed
-  // 'Pistol • 0' no matter which weapon was actually selected.
+  const title = (id) => WEAPON_DISPLAY_NAMES[id]
+    || (typeof id === 'string' && id ? id.charAt(0).toUpperCase() + id.slice(1) : 'Pistol');
   if (typeof cur === 'string') {
-    const ammoMap = w.ammo || {};
-    const name = WEAPON_DISPLAY_NAMES[cur]
-      || (cur.charAt(0).toUpperCase() + cur.slice(1));
-    return { name, ammo: num(ammoMap[cur], 0), mag: 0 };
+    return { name: title(cur), ammo: num((w.ammo || {})[cur], 0), mag: 0 };
   }
-  if (cur) {
+  if (cur && typeof cur === 'object') {
+    const id = cur.id || cur.name || 'pistol';
     return {
-      name: cur.name || cur.id || 'Pistol',
-      ammo: num(cur.ammo, num(cur.reserve, 0)),
+      name: cur.name || title(id),
+      ammo: num(cur.ammo, num((w.ammo || {})[id], num(cur.reserve, 0))),
       mag: num(cur.mag, num(cur.magazine, 0)),
     };
   }
   const p = G.player || {};
-  return {
-    name: p.weaponName || p.weapon || 'Pistol',
-    ammo: num(p.ammo, 0),
-    mag: 0,
-  };
+  return { name: p.weaponName || p.weapon || 'Pistol', ammo: num(p.ammo, 0), mag: 0 };
 }
 
+// What the HUD prints for the radio. The radio module keeps the station
+// as a NUMBER index and answers stationName() with the real name —
+// printing the raw station value shows '1'/'2' instead of a station.
+// Try the name function first, then the stations array by index, then
+// any object-shaped station, then the audio fallback.
 function radioInfo(G) {
   const r = G.radio || {};
-  // The live shape: station is a NUMBER index and the name comes from
-  // the stationName() function. The old code String()'d the index, so
-  // the HUD showed '1' / '2' instead of the station name (station 0
-  // only looked right because it fell through to the 'Bay FM' default).
+  const on = r.on !== false;
   if (typeof r.stationName === 'function') {
     try {
       const n = r.stationName();
-      if (n) return { name: n, on: r.on !== false };
-    } catch { /* fall through */ }
+      if (n) return { name: n, on };
+    } catch { /* fall through to the next shape */ }
   }
   if (Array.isArray(r.stations) && typeof r.station === 'number') {
     const st = r.stations[r.station];
-    if (st) return { name: st.name || st.title || String(st), on: r.on !== false };
+    if (st) return { name: st.name || st.title || String(st), on };
   }
   const st = r.station || r.current || null;
   if (st && typeof st === 'object') {
-    return {
-      name: st.name || st.title || String(st),
-      on: r.on !== false,
-    };
+    return { name: st.name || st.title || String(st), on };
   }
   if (typeof r.stationName === 'string' && r.stationName) {
-    return { name: r.stationName, on: r.on !== false };
+    return { name: r.stationName, on };
   }
   const a = G.audio || {};
   if (typeof a.stationName === 'string' && a.stationName) {
