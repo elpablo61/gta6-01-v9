@@ -571,6 +571,15 @@ export function init(G) {
     // of guessing from position alone.
     dbgBranch: 'init',
     dbgDrive: 'none',
+    // B9 Fase 3 no-progress watchdog: escapeUntil is the game-time
+    // end of a forced direct drive (set by update() after 10s with no
+    // position progress); noProgressSince is when the current
+    // standstill started; lastBranch is the last driveChase branch,
+    // kept across update()'s per-frame dbgBranch reset so the
+    // watchdog can tell a deliberate wait (face) from a stuck drive.
+    escapeUntil: 0,
+    noProgressSince: 0,
+    lastBranch: 'init',
   };
   G.autopilot = state;
   G.autopilotEnabled = false;
@@ -607,9 +616,16 @@ function driveToward(G, state, target, cruise, opts) {
   const keys = state.keys;
 
   // Route handling: recompute when the target moved, or when we ran out.
+  // Escape mode (B9 Fase 3 watchdog): after 10s with no position
+  // progress the normal plan has already failed, so drive straight at
+  // the target — no router, no close-in brake — for a few seconds.
+  const escaping = (state.escapeUntil || 0) > (state.now || 0);
   const targetMoved = !state.routeTarget
     || dist(target.x, target.y, state.routeTarget.x, state.routeTarget.y) > 120;
-  if (targetMoved || state.route.length === 0) {
+  if (escaping) {
+    state.route = [{ x: target.x, y: target.y }];
+    state.routeTarget = { x: target.x, y: target.y };
+  } else if (targetMoved || state.route.length === 0) {
     state.route = computeRoute(G, p, target);
     state.routeTarget = { x: target.x, y: target.y };
   }
@@ -664,7 +680,16 @@ function driveToward(G, state, target, cruise, opts) {
   const wpDist = dist(p.x, p.y, waypoint.x, waypoint.y);
   const needBrake = ram ? false : ((Math.abs(diff) > 0.55 && speed > 120)
     || (turnAtWp > 0.9 && wpDist < 260 && speed > 60));
-  const closeIn = !ram && distance < 140;
+  // Close-in brake is for ARRIVAL AT SPEED. It must never park a
+  // stationary car whose next waypoint is still far away: probe #1
+  // froze 142s in recovery at (2096,1434) because the final target
+  // was 34 units away (closeIn fired, throttle released at speed 0)
+  // while the first waypoint sat 109 units away behind a 42-unit
+  // radius — a deadlock no route clear can break, since the same
+  // target recomputes the same route. Below 60 u/s the car throttles
+  // toward the waypoint instead; above 60 it still brakes to arrive.
+  // Escape mode never brakes for arrival at all.
+  const closeIn = !ram && !escaping && distance < 140 && speed > 60;
   if (needBrake || closeIn) {
     keys.release('KeyW');
     if (speed > 60) keys.hold('KeyS');
@@ -950,6 +975,11 @@ function driveChase(G, state, courier, courierPos) {
   const playerTop = Math.max(200, topSpeedOf(vehicle));
   const now = state.now;
   const dCourier = dist(p.x, p.y, courierPos.x, courierPos.y);
+  // Escape mode (B9 Fase 3 watchdog): set by update() after 10s with
+  // no position progress. A waiting car is not a stuck car, but no
+  // wait is unbounded — escape skips the face-hold below and drives
+  // straight at the corner instead.
+  const escaping = (state.escapeUntil || 0) > now;
 
   // Off-road recovery first, and it is NOT optional any more. The
   // failed arc run proved why: the car left the road at 420, slid
@@ -1083,7 +1113,10 @@ function driveChase(G, state, courier, courierPos) {
   // Parked at the corner with the courier still far off: face its
   // approach so the lunge starts with the nose already right. Rotate
   // in place, never drive — driving now would leave the corner.
-  if (dCorner < 90 && dCourier >= 500) {
+  // Escape mode skips the wait: the watchdog only fires after 30s
+  // of no progress in face (a courier leg is 15-20s), so by then the
+  // wait itself is the problem and the car drives at the corner.
+  if (dCorner < 90 && dCourier >= 500 && !escaping) {
     mark(state, 'face', null);
     steerAndThrottle(G, state, aimClose, playerTop, speed, heading, { face: true });
     return true;
@@ -1263,7 +1296,7 @@ function closeGarageMenu(G) {
 // ---------------------------------------------------------------------------
 
 function mark(state, branch, drive) {
-  if (branch) state.dbgBranch = branch;
+  if (branch) { state.dbgBranch = branch; state.lastBranch = branch; }
   if (drive) state.dbgDrive = drive;
 }
 
@@ -1326,6 +1359,9 @@ function publishDebug(G, state) {
         routeLen: Array.isArray(courier.route) ? courier.route.length : null,
       } : null,
       stuckFor: +(state.now - (state.stuckSince || 0)).toFixed(1),
+      escaping: (state.escapeUntil || 0) > (state.now || 0),
+      noProgress: state.noProgressSince ? +(state.now - state.noProgressSince).toFixed(1) : 0,
+      lastBranch: state.lastBranch || null,
       chaseStartAt: +(state.chaseStartAt || 0).toFixed(1),
       objective: live ? `${Math.round(live.x)},${Math.round(live.y)}` : null,
     };
@@ -1372,15 +1408,40 @@ export function update(G, dt) {
   // Track stuckness: if we have not moved in 4 seconds while trying to
   // reach something, clear the cached route, the ambush cache and the
   // walk target — a stale plan is what keeps the car grinding one wall.
+  // B9 Fase 3 no-progress watchdog: the 4s clear alone cannot save a
+  // car parked by its own brake logic — probe #1 froze 142s in
+  // recovery at (2096,1434) while the 4s clear fired every cycle,
+  // because the same target recomputes the same route. Ten seconds
+  // with no position progress (30s in the deliberate face wait, whose
+  // courier leg is 15-20s) forces escape mode: a fresh direct drive
+  // at the target, no router, no close-in brake, for 5 seconds. It
+  // re-fires every 10s/30s while still stuck, so the car can never
+  // sit in one state without progress again.
   if (!state.lastPos || now - state.lastPosAt > 0.5) {
-    if (state.lastPos && dist(p.x, p.y, state.lastPos.x, state.lastPos.y) < 6 && now - state.stuckSince > 4) {
+    const moved = !state.lastPos || dist(p.x, p.y, state.lastPos.x, state.lastPos.y) >= 6;
+    if (moved) {
+      state.noProgressSince = 0;
+    } else if (!state.noProgressSince) {
+      state.noProgressSince = now;
+    }
+    if (state.lastPos && !moved && now - state.stuckSince > 4) {
       state.route = [];
       chaseReset(state);
       state.walkTarget = null;
       state.walkTargetPos = null;
       state.stuckSince = now;
     }
-    if (!state.lastPos || dist(p.x, p.y, state.lastPos.x, state.lastPos.y) >= 6) {
+    const waitLimit = state.lastBranch === 'face' ? 30 : 10;
+    if (state.noProgressSince && now - state.noProgressSince > waitLimit) {
+      state.escapeUntil = now + 5;
+      state.route = [];
+      state.routeTarget = null;
+      chaseReset(state);
+      state.walkTarget = null;
+      state.walkTargetPos = null;
+      state.noProgressSince = now;
+    }
+    if (moved) {
       state.stuckSince = now;
     }
     state.lastPos = { x: p.x, y: p.y };
