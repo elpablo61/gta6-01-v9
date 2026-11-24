@@ -124,12 +124,13 @@ function isDriving(G) {
 
 function allVehicles(G) {
   const v = G.vehicles;
-  // G.vehicles is an array carrying a .list (see vehicles.js init):
-  // the live cars are in .list, the array itself is always empty.
-  if (v && Array.isArray(v.list)) return v.list;
-  if (Array.isArray(v)) return v;
-  if (v && Array.isArray(v.all)) return v.all;
-  if (v && Array.isArray(v.parked)) return v.parked;
+  // The live cars live in .list: G.vehicles is an array carrying that
+  // property (see vehicles.js init), and the array itself is always
+  // empty — checking Array.isArray(v) first returned nothing forever.
+  const shapes = [v && v.list, v, v && v.all, v && v.parked];
+  for (const shape of shapes) {
+    if (Array.isArray(shape)) return shape;
+  }
   return [];
 }
 
@@ -174,24 +175,37 @@ function missionComplete(G, mission) {
     || mission.state === 'complete';
 }
 
+// Whether a DOM overlay with this id is currently shown. The hidden
+// attribute is the authority: offsetParent is null for a hidden
+// element AND for a visible one inside a hidden ancestor, so it cannot
+// tell the two apart and used to report open dialogs as closed.
+function overlayShown(id) {
+  if (typeof document === 'undefined') return false;
+  const el = document.getElementById(id);
+  return !!(el && !el.hidden);
+}
+
 // The objective target: a marker, checkpoint, drop, courier, enemy, or any
 // point the mission wants Rook to reach. Several shapes are accepted.
-function objectiveTarget(G, mission) {
-  // The LIVE objective lives on the exposed missions object
-  // (G.missions.objective = {x, y, label, kind}, set by setupStage).
-  // The mission DEF has no target/marker/objective fields, so reading
-  // only the def always returned null here and the autopilot fell
-  // through to roam instead of driving to the marker — m1 stalled
-  // forever at stage 0 (arc progress: roam, ~250,370, never moving
-  // toward the market at 600,600).
+// The LIVE objective wins over the mission def: it lives on the exposed
+// missions object (G.missions.objective = {x, y, label, kind}, set by
+// setupStage), while the mission DEF carries no target/marker/objective
+// fields at all — reading only the def always returned null here and
+// the autopilot fell through to roam instead of driving to the marker.
+function liveObjective(G) {
   const live = G && G.missions;
-  if (live && live.objective) {
-    const point = posOf(live.objective);
-    if (point) return { x: point.x, y: point.y, ref: live.objective };
-    if (typeof live.objective.x === 'number' && typeof live.objective.y === 'number') {
-      return { x: live.objective.x, y: live.objective.y, ref: live.objective };
-    }
+  if (!live || !live.objective) return null;
+  const point = posOf(live.objective);
+  if (point) return { x: point.x, y: point.y, ref: live.objective };
+  if (typeof live.objective.x === 'number' && typeof live.objective.y === 'number') {
+    return { x: live.objective.x, y: live.objective.y, ref: live.objective };
   }
+  return null;
+}
+
+function objectiveTarget(G, mission) {
+  const live = liveObjective(G);
+  if (live) return live;
   if (!mission) return null;
   const candidates = [
     mission.target, mission.marker, mission.checkpoint, mission.destination,
@@ -205,9 +219,11 @@ function objectiveTarget(G, mission) {
     if (point) return { x: point.x, y: point.y, ref: candidate };
     if (candidate && typeof candidate.x === 'number') return { x: candidate.x, y: candidate.y, ref: candidate };
   }
-  // Checkpoints are a list; take the first unvisited one.
+  // Checkpoints are a list; take the first unvisited one. The live
+  // lists on G.missions count too, and a hit checkpoint is done.
+  const liveLists = G && G.missions;
   const list = mission.checkpoints || mission.markers || mission.drops
-    || (live && (live.checkpoints || live.drops));
+    || (liveLists && (liveLists.checkpoints || liveLists.drops));
   if (Array.isArray(list)) {
     for (const entry of list) {
       if (entry && (entry.visited || entry.done || entry.collected || entry.hit)) continue;
@@ -235,61 +251,55 @@ function missionEnemies(G, mission) {
 
 function dialogOpen(G) {
   // Authoritative first: the game state and the missions module's own
-  // dialog flag. The old code only asked currentMission() — which falls
-  // back to the m1 DEF (no dialogOpen field) while the offer is still
-  // unaccepted — and the DOM fallback below, so the autopilot never saw
-  // the dialog and the arc stalled at m1 forever (roam mode, frozen).
+  // dialog flag. Asking only the current mission falls back to the m1
+  // DEF (which has no dialogOpen field) while the offer is still
+  // unaccepted, so the autopilot never saw the dialog and the arc
+  // stalled at m1 in roam, frozen.
   if (G && G.state === 'dialog') return true;
   if (G && G.missions && G.missions.dialogOpen === true) return true;
   if (G.ui && (G.ui.dialogOpen === true || G.ui.dialog === true)) return true;
   if (G.dialog && G.dialog.open === true) return true;
   const mission = currentMission(G);
   if (mission && mission.dialogOpen === true) return true;
-  if (typeof document !== 'undefined') {
-    const el = document.getElementById('mission-dialog');
-    if (el && !el.hidden) return true;
-  }
-  return false;
+  return overlayShown('mission-dialog');
 }
 
 function garageMenuOpen(G) {
   if (G.garage && (G.garage.open === true || G.garage.menuOpen === true)) return true;
   if (G.ui && (G.ui.garageOpen === true || G.ui.garage === true)) return true;
-  if (typeof document !== 'undefined') {
-    const el = document.getElementById('garage-menu') || document.getElementById('garage-overlay');
-    if (el && !el.hidden) return true;
-  }
-  return false;
+  return overlayShown('garage-menu') || overlayShown('garage-overlay');
 }
 
 function gameOverShown(G) {
   if (G.gameOver === true || G.state === 'gameover' || G.screen === 'gameover') return true;
-  if (typeof document !== 'undefined') {
-    const el = document.getElementById('game-over-screen');
-    if (el && !el.hidden) return true;
-  }
-  return false;
+  return overlayShown('game-over-screen');
 }
 
 function titleShown(G) {
   if (G.screen === 'title' || G.state === 'title') return true;
-  if (typeof document !== 'undefined') {
-    const el = document.getElementById('title-screen');
-    if (el && !el.hidden) return true;
-  }
-  return false;
+  return overlayShown('title-screen');
+}
+
+// A named place from the world's places map first, then the older flat
+// fields, then a caller-supplied fallback. The places map is the one
+// source of truth for where things are.
+function placePos(G, name, fallback) {
+  const w = G.world || {};
+  return posOf(w.places && w.places[name])
+    || posOf(w[name]) || posOf(G[name]) || fallback;
 }
 
 function sprayShopPos(G) {
   const w = G.world || {};
-  return posOf(w.places && w.places.sprayShop) || posOf(w.sprayShop) || posOf(w.spray) || posOf(w.spray_shop)
-    || posOf(G.sprayShop) || { x: 600, y: 600 };
+  return placePos(G, 'sprayShop', null)
+    || posOf(w.spray) || posOf(w.spray_shop) || { x: 600, y: 600 };
 }
 
 function garagePos(G) {
   const w = G.world || {};
-  return posOf(w.places && w.places.garage) || posOf(w.garage) || posOf(w.fixerGarage) || posOf(w.fixer_garage)
-    || posOf(G.garage) || posOf(G.garage && G.garage.position) || { x: 1000, y: 1000 };
+  return placePos(G, 'garage', null)
+    || posOf(w.fixerGarage) || posOf(w.fixer_garage)
+    || posOf(G.garage && G.garage.position) || { x: 1000, y: 1000 };
 }
 
 function hideoutPos(G) {
@@ -491,22 +501,19 @@ function computeRoute(G, from, to) {
   const world = G.world || {};
   const finder = world.findRoute || world.route || world.findPath || world.bfsRoute || G.findRoute;
   if (typeof finder === 'function') {
-    // The world's findRoute takes FOUR NUMBERS (sx, sy, tx, ty). The
-    // old call passed two point OBJECTS, which threw inside the router
-    // (nearestRoadPoint got an object and returned null), so every
-    // route silently fell to the midpoint fallback below: one road
-    // point + the target, i.e. a straight diagonal across a building
-    // block. The car wedged itself inside the block and crawled at
-    // ~5 u/s along the walls (m1 stalled, t=105s at 518,16). Try the
-    // numeric form first, then the object form, then fall back.
-    for (const args of [[from.x, from.y, to.x, to.y], [from, to]]) {
-      try {
-        const raw = finder.call(world, ...args);
-        if (Array.isArray(raw) && raw.length > 0) {
-          return raw.map((p) => posOf(p)).filter(Boolean);
-        }
-      } catch {
-        // Try the next calling shape.
+    // The world's findRoute takes FOUR NUMBERS (sx, sy, tx, ty). Calling
+    // it with two point OBJECTS threw inside the router (nearestRoadPoint
+    // got an object and returned null), so every route silently fell to
+    // the midpoint fallback below: one road point + the target, a straight
+    // diagonal across a building block. The car wedged inside the block
+    // and crawled at ~5 u/s along the walls. Try the numeric form first,
+    // then the object form, then fall back.
+    const shapes = [[from.x, from.y, to.x, to.y], [from, to]];
+    for (const args of shapes) {
+      let raw = null;
+      try { raw = finder.call(world, ...args); } catch (e) { raw = null; }
+      if (Array.isArray(raw) && raw.length > 0) {
+        return raw.map((p) => posOf(p)).filter(Boolean);
       }
     }
   }
@@ -547,7 +554,7 @@ export function init(G) {
     lastPos: null,
     lastPosAt: 0,
     now: 0,
-    // Chase (m2) interception state: a cached road route to a fixed
+    // Chase (m2) interception state, cached: a road route to a fixed
     // ambush junction, refreshed only when the ambush moves or goes
     // stale — never rebuilt because the courier inched forward.
     chaseRoute: [],
@@ -569,12 +576,21 @@ function setMode(G, mode) {
   if (G.autopilot) G.autopilot.mode = mode;
 }
 
+// Hold exactly one steer key for the signed angle difference, releasing
+// the other — never both at once. A dead zone of ~0.12 rad keeps the car
+// from weaving on a straight road.
+function steerToward(keys, diff) {
+  if (diff > 0.12) { keys.hold('KeyD'); keys.release('KeyA'); }
+  else if (diff < -0.12) { keys.hold('KeyA'); keys.release('KeyD'); }
+  else { keys.release('KeyA'); keys.release('KeyD'); }
+}
+
 // Drive toward a point. Returns true when the autopilot drove this frame
 // (so the caller must skip manual driving and set the flag).
-// opts.ram: ramming run — hold full throttle straight at the target and
-// never brake for arrival: a ram only registers above 120 u/s, and the
-// closeIn brake (<= 60 within 140) made m2 hits impossible — the car
-// always arrived at the courier too slow to count.
+// opts.ram: a ramming run — hold full throttle straight at the target
+// and never brake for arrival. A ram only registers above 120 u/s, and
+// the close-in brake (<= 60 within 140) made m2 hits impossible: the
+// car always arrived at the courier too slow to count.
 function driveToward(G, state, target, cruise, opts) {
   const ram = !!(opts && opts.ram);
   const p = playerPos(G);
@@ -605,39 +621,34 @@ function driveToward(G, state, target, cruise, opts) {
 
   // A turn sharper than ~52 degrees: stop fully, rotate in place, then go
   // straight. A moving turning circle is wider than the 64-wide road.
-  // Release the OPPOSITE steer key too: without it, a steer key left
-  // held from walking (or from a previous turn the other way) stays down
-  // alongside the new one, A and D cancel to steer 0, the car never
-  // turns, and it crawls straight into the nearest wall forever (m1
-  // stalled at y=16, angle frozen at -1.45, keys A+D held together).
+  // steerToward holds exactly ONE steer key: a steer key left held from
+  // walking (or from a previous turn the other way) used to stay down
+  // alongside the new one, A and D cancelled to steer 0, the car never
+  // turned, and it crawled straight into the nearest wall forever.
   if (Math.abs(diff) > 0.9 && speed < 140) {
     keys.release('KeyW');
     keys.release('KeyS');
-    if (diff > 0) { keys.hold('KeyD'); keys.release('KeyA'); }
-    else { keys.hold('KeyA'); keys.release('KeyD'); }
+    steerToward(keys, diff);
     // Crawl forward while rotating so the car keeps a little authority.
     if (speed < 25) keys.hold('KeyW');
     return true;
   }
 
   // Steering follows the sign of the angle difference.
-  if (diff > 0.12) { keys.hold('KeyD'); keys.release('KeyA'); }
-  else if (diff < -0.12) { keys.hold('KeyA'); keys.release('KeyD'); }
-  else { keys.release('KeyA'); keys.release('KeyD'); }
+  steerToward(keys, diff);
 
   // Brake ahead of a sharp turn, otherwise throttle toward cruise speed.
-  // Two gaps the old check had (m1 stage 1 stalled in a loop at the
-  // market junction, hp 46 -> 2 grinding a building): it only braked
-  // when already facing the turn (|diff| > 0.55) at speed > 180, and it
-  // never looked at the turn AFTER the current waypoint. A car arriving
-  // at a 90-degree junction at ~178 u/s faced the turn too late, in the
-  // dead zone where it was too fast for the stop-and-rotate branch
-  // (> 140) but under the brake threshold, so it held full throttle
-  // through the turn, overshot the junction north into the building,
-  // wedged, and the stuck-handler recompute sent it back west to retry
-  // the same trap forever. Brake early for a sharp turn AT the waypoint
-  // (incoming leg vs outgoing leg), and brake for any sharp facing turn
-  // above 120 so speed is under 140 when the rotate branch takes over.
+  // The old check only braked when already facing the turn (|diff| >
+  // 0.55) at speed > 180, and never looked at the turn AFTER the current
+  // waypoint. A car arriving at a 90-degree junction at ~178 u/s faced
+  // the turn too late, in the dead zone where it was too fast for the
+  // stop-and-rotate branch (> 140) but under the brake threshold, so it
+  // held full throttle through the turn, overshot the junction north
+  // into the building, wedged, and the stuck-handler recompute sent it
+  // back west to retry the same trap forever. Brake early for a sharp
+  // turn AT the waypoint (incoming leg vs outgoing leg), and brake for
+  // any sharp facing turn above 120 so speed is under 140 when the
+  // rotate branch takes over.
   const nextWp = state.route[1] || target;
   const inAngle = Math.atan2(waypoint.y - p.y, waypoint.x - p.x);
   const outAngle = Math.atan2(nextWp.y - waypoint.y, nextWp.x - waypoint.x);
@@ -658,6 +669,14 @@ function driveToward(G, state, target, cruise, opts) {
     keys.release('KeyS');
   }
   return true;
+}
+
+// The courier: first the mission def's own car fields, then the live
+// courier on the exposed missions state (G.missions.courier).
+function readCourier(G, mission) {
+  const fromDef = mission && (mission.courier || mission.targetVehicle || mission.targetCar);
+  if (fromDef) return fromDef;
+  return (G && G.missions && G.missions.courier) || null;
 }
 
 // --- Chase driving (m2): intercept, don't tail-chase. ---------------------
@@ -695,102 +714,58 @@ function driveToward(G, state, target, cruise, opts) {
 // 120 u/s and any brake there throws the hit away.
 
 function chaseReset(state) {
-  state.chaseRoute = [];
-  state.chaseRouteDest = null;
-  state.chaseRouteAt = 0;
-  state.chaseIntercept = null;
-  state.chaseInterceptAt = 0;
-  state.chaseStartAt = 0;
-  state.chaseKey = '';
-}
-
-function courierVelocity(courier) {
-  const speed = speedOf(courier);
-  const heading = headingOf(courier);
-  return { x: Math.cos(heading) * speed, y: Math.sin(heading) * speed, speed };
+  // Fresh ambush cache: the old intercept belongs to the old courier leg.
+  const fresh = {
+    chaseRoute: [],
+    chaseRouteDest: null,
+    chaseRouteAt: 0,
+    chaseIntercept: null,
+    chaseInterceptAt: 0,
+    chaseStartAt: 0,
+    chaseKey: '',
+  };
+  Object.assign(state, fresh);
 }
 
 // Where the courier will be when we could reach it: lead by the
 // closing time, clamped so a slow car does not aim absurdly far ahead.
-function predictPosition(courier, courierPos, playerPos, playerTop) {
-  const vel = courierVelocity(courier);
+function leadPoint(courier, courierPos, playerPos, playerTop) {
+  const speed = speedOf(courier);
+  const heading = headingOf(courier);
+  const vx = Math.cos(heading) * speed;
+  const vy = Math.sin(heading) * speed;
   const d = dist(playerPos.x, playerPos.y, courierPos.x, courierPos.y);
-  const closing = Math.max(60, playerTop - vel.speed);
+  const closing = Math.max(60, playerTop - speed);
   const lead = clamp(d / closing, 0.4, 2.5);
   return {
-    x: clamp(courierPos.x + vel.x * lead, 20, 3180),
-    y: clamp(courierPos.y + vel.y * lead, 20, 3180),
+    x: clamp(courierPos.x + vx * lead, 20, 3180),
+    y: clamp(courierPos.y + vy * lead, 20, 3180),
   };
 }
 
-function routeDistance(from, points) {
-  let total = 0;
-  let prev = from;
-  for (const point of points) {
-    total += dist(prev.x, prev.y, point.x, point.y);
-    prev = point;
-  }
-  return total;
-}
-
-// The soonest junction ahead on the courier's own route that the
-// player can reach no later than the courier. Scan the WHOLE route,
-// not just the first few junctions: the reachable meeting is often
-// far along it — the player's cross-map road route to a distant
-// junction can be shorter in time than the courier's zigzag to the
-// near ones (the probe watched the player trail the courier's route
-// a leg behind for minutes because the scan stopped at 6 junctions
-// while the meeting sat at the 8th, gap -0.3s). The player's time
-// is estimated at 75% of top speed: the raw top-speed figure ignores
-// every junction slowdown, and an "on time" estimate that is really
-// two seconds late is how the ambush kept arriving after the courier
-// had already left it.
-function pickIntercept(G, state, courier, courierPos, playerPos, playerTop) {
-  const route = courier && Array.isArray(courier.route) ? courier.route : null;
-  if (!route || route.length < 2) return null;
-  // The courier is still accelerating in the first seconds; timing the
-  // meeting on its current speed would aim at junctions it reaches
-  // much sooner. Floor the estimate at 250 so the ambush is not picked
-  // a junction too near.
-  const courierSpeed = Math.max(250, speedOf(courier));
-  const ourSpeed = Math.max(60, playerTop * 0.75);
-  let courierRun = dist(courierPos.x, courierPos.y, route[0].x, route[0].y);
-  let best = null;
-  let bestGap = Infinity;
-  for (let k = 1; k <= route.length - 1; k += 1) {
-    const wp = posOf(route[k]);
-    if (!wp) continue;
-    courierRun += dist(route[k - 1].x, route[k - 1].y, wp.x, wp.y);
-    const courierTime = courierRun / courierSpeed;
-    const ourRoute = computeRoute(G, playerPos, wp);
-    const ourTime = routeDistance(playerPos, ourRoute) / ourSpeed;
-    const gap = ourTime - courierTime;
-    if (gap <= 0) return { x: wp.x, y: wp.y };
-    if (gap < bestGap) { bestGap = gap; best = { x: wp.x, y: wp.y }; }
-  }
-  // No junction is reachable on time: take the least-late one when it
-  // is close (within 3s) rather than trailing the route from behind —
-  // arriving just after the courier still puts the player on its tail
-  // on the same road. Otherwise return null and let the caller join
-  // the route at its nearest point.
-  return bestGap <= 3 ? best : null;
-}
+// NOTE: the junction-scan intercept (pickIntercept) and the
+// block-reverse recovery (recoverToRoad) are gone: the v11 corner
+// ambush replaced the scan — the courier's destination corner is a
+// fixed point for a whole leg — and the v12 recovery drives back to
+// the road with the m1 driver instead of reversing in the block.
 
 // Is the point 55 units ahead of the car open ground? The m2 start
 // often leaves the car off-road inside a block, and creeping forward
-// while rotating grinds it against the nearest building (probe: speed
-// stuck at 7-8 u/s, position frozen for 40+ seconds). Ask the world
+// while rotating grinds it against the nearest building. Ask the world
 // when it can answer; without a query, assume open.
 function noseClear(G, p, heading) {
   const world = G.world || {};
-  const nx = p.x + Math.cos(heading) * 55;
-  const ny = p.y + Math.sin(heading) * 55;
-  try {
-    if (typeof world.pointInBuilding === 'function') return !world.pointInBuilding(nx, ny, 0);
-    if (typeof world.isBlocked === 'function') return !world.isBlocked(nx, ny);
-    if (typeof world.isSolid === 'function') return !world.isSolid(nx, ny);
-  } catch {
-    // A failed query must not stall the chase; assume open.
+  const ahead = { x: p.x + Math.cos(heading) * 55, y: p.y + Math.sin(heading) * 55 };
+  const queries = [
+    () => world.pointInBuilding(ahead.x, ahead.y, 0),
+    () => world.isBlocked(ahead.x, ahead.y),
+    () => world.isSolid(ahead.x, ahead.y),
+  ];
+  for (const q of queries) {
+    try {
+      const blocked = q();
+      if (typeof blocked === 'boolean') return !blocked;
+    } catch (e) { /* fall through to the next query shape */ }
   }
   return true;
 }
@@ -805,12 +780,12 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
   const p = playerPos(G);
   const desired = Math.atan2(aim.y - p.y, aim.x - p.x);
   const diff = angleDiff(desired, heading);
+  const faceOnly = !!(opts && opts.face);
+  const direct = !!(opts && opts.direct);
 
   // Facing the wrong way at speed: brake in a straight line first.
   // Steering while braking at 300+ arcs the car off the road into a
-  // block — the probe watched the car brake-turn north into the block
-  // above (1800,1000) at the m2 start and sit wedged there for 30
-  // seconds. No steering while the speed is high; once slow, the
+  // block. No steering while the speed is high; once slow, the
   // rotate-in-place branch below takes over.
   if (Math.abs(diff) > 1.5 && Math.abs(speed) > 60) {
     keys.release('KeyA');
@@ -823,15 +798,14 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
   if (Math.abs(diff) > 1.2 && Math.abs(speed) < 50) {
     keys.release('KeyW');
     keys.release('KeyS');
-    if (diff > 0) { keys.hold('KeyD'); keys.release('KeyA'); }
-    else { keys.hold('KeyA'); keys.release('KeyD'); }
+    steerToward(keys, diff);
     // Creep only into open space. When the nose is blocked, back out
     // instead: reversing while steering turns the nose the same way,
     // so the car backs out of the block while still rotating toward
     // the target, instead of grinding against the wall forever.
     // Face mode (parked at an ambush corner) never creeps: the car
     // must stay on the corner, nose turning, wheels still.
-    if (Math.abs(speed) < 25 && !(opts && opts.face)) {
+    if (Math.abs(speed) < 25 && !faceOnly) {
       if (noseClear(G, p, heading)) keys.hold('KeyW');
       else keys.hold('KeyS');
     }
@@ -840,16 +814,14 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
   // Face mode: rotate in place toward the aim, never drive. The
   // rotate branch above handles the turn; once roughly facing, hold
   // still — the car is parked where the courier is coming.
-  if (opts && opts.face) {
+  if (faceOnly) {
     keys.release('KeyW');
     keys.release('KeyS');
     return;
   }
-  if (diff > 0.08) { keys.hold('KeyD'); keys.release('KeyA'); }
-  else if (diff < -0.08) { keys.hold('KeyA'); keys.release('KeyD'); }
-  else { keys.release('KeyA'); keys.release('KeyD'); }
+  steerToward(keys, diff);
 
-  if (opts && opts.direct) {
+  if (direct) {
     keys.hold('KeyW');
     keys.release('KeyS');
     return;
@@ -869,10 +841,9 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
     // Brake early and hard for sharp junction turns: the turning
     // radius at 200 u/s is ~91 units, wider than the 64-wide road,
     // so the car overshoots the junction, grinds a building face and
-    // drops to ~7 u/s (the probe watched exactly that at (200,1000)).
-    // At 110 the radius is ~46 and the car turns inside the junction
-    // instead of past it; the courier is capped the same way, so the
-    // chase loses seconds at a turn rather than ten.
+    // drops to ~7 u/s. At 110 the radius is ~46 and the car turns
+    // inside the junction instead of past it; the courier is capped
+    // the same way, so the chase loses seconds at a turn rather than ten.
     if (turn > 1.5 && wpDist < 400) cap = Math.min(cap, 110);
     else if (turn > 0.9 && wpDist < 350) cap = Math.min(cap, 180);
   }
@@ -883,53 +854,6 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
     keys.hold('KeyW');
     keys.release('KeyS');
   }
-}
-
-// At the chase start the car often sits off-road inside a block (m1
-// ends within 60 of downtown, not on the road). No amount of
-// rotate-in-place fixes that: creeping while rotating grinds the car
-// against the nearest building, and driving forward at a large
-// steering angle arcs it deeper into the block. Recover to the road
-// first: drive forward only when the road point is almost straight
-// ahead; otherwise reverse straight toward it, steering by the rear's
-// heading (the rear swings the way the nose turns, so the car backs
-// out of the block onto the road instead of turning in it).
-// The target is the last on-road point the car actually drove through
-// (a breadcrumb), not the geometrically nearest road point: the
-// nearest point can sit behind a building — the probe watched the car
-// spend 200+ seconds oscillating in the NW corner block aiming at a
-// road point it could never reach — while the breadcrumb is the exit
-// the car just used, open by construction.
-function recoverToRoad(G, state, p, heading, target) {
-  const world = G.world || {};
-  let roadPoint = target || null;
-  if (!roadPoint) {
-    const nearest = world.nearestRoadPoint || world.nearestRoad || world.snapToRoad;
-    if (typeof nearest !== 'function') return false;
-    try {
-      const raw = nearest.call(world, p.x, p.y);
-      roadPoint = posOf(raw) || (Array.isArray(raw) ? { x: raw[0], y: raw[1] } : null);
-    } catch { roadPoint = null; }
-  }
-  if (!roadPoint) return false;
-  const keys = state.keys;
-  const desired = Math.atan2(roadPoint.y - p.y, roadPoint.x - p.x);
-  const diff = angleDiff(desired, heading);
-  if (Math.abs(diff) < 0.5) {
-    if (diff > 0.08) { keys.hold('KeyD'); keys.release('KeyA'); }
-    else if (diff < -0.08) { keys.hold('KeyA'); keys.release('KeyD'); }
-    else { keys.release('KeyA'); keys.release('KeyD'); }
-    keys.hold('KeyW');
-    keys.release('KeyS');
-  } else {
-    const rearDiff = angleDiff(desired, heading + Math.PI);
-    if (rearDiff > 0.08) { keys.hold('KeyD'); keys.release('KeyA'); }
-    else if (rearDiff < -0.08) { keys.hold('KeyA'); keys.release('KeyD'); }
-    else { keys.release('KeyA'); keys.release('KeyD'); }
-    keys.hold('KeyS');
-    keys.release('KeyW');
-  }
-  return true;
 }
 
 // The junction on the courier's own route nearest the player: the
@@ -945,7 +869,9 @@ function nearestRouteJunction(courier, playerPos) {
     const point = posOf(wp);
     if (!point) continue;
     const d = dist(playerPos.x, playerPos.y, point.x, point.y);
-    if (d < bestDist) { bestDist = d; best = point; }
+    if (d >= bestDist) continue;
+    bestDist = d;
+    best = point;
   }
   return best ? { x: best.x, y: best.y } : null;
 }
@@ -1076,7 +1002,7 @@ function driveChase(G, state, courier, courierPos) {
   // watched the player turn west to an ambush while the courier, at
   // 160 u/s and 500 away, came east through the player's position).
   if (now - state.chaseStartAt < 5 && dCourier < 700) {
-    const aimOpen = predictPosition(courier, courierPos, p, playerTop);
+    const aimOpen = leadPoint(courier, courierPos, p, playerTop);
     // Sprint only down an open line: a straight charge across a block
     // corner is what put the car into the west wall in the arc run.
     // When the line is blocked, fall through to the road-route ambush.
@@ -1095,7 +1021,7 @@ function driveChase(G, state, courier, courierPos) {
   // only earns its keep while the courier is fast; against a crawling
   // courier at long range the road route still catches it easily.
   if (speedOf(courier) < 150 && dCourier < 400) {
-    const aimSlow = predictPosition(courier, courierPos, p, playerTop);
+    const aimSlow = leadPoint(courier, courierPos, p, playerTop);
     // Same open-line rule as the sprint: a crawling courier one road
     // over is not worth a charge through a building row.
     if (!segmentBlocked(G, p, aimSlow)) {
@@ -1116,14 +1042,14 @@ function driveChase(G, state, courier, courierPos) {
   // slide off the map edge at x=16.
   const corner = (typeof courier.destX === 'number' && typeof courier.destY === 'number')
     ? { x: courier.destX, y: courier.destY }
-    : (nearestRouteJunction(courier, p) || predictPosition(courier, courierPos, p, playerTop));
+    : (nearestRouteJunction(courier, p) || leadPoint(courier, courierPos, p, playerTop));
   const dCorner = dist(p.x, p.y, corner.x, corner.y);
 
   // Lunge: parked at the corner, or the courier close and roughly
   // ahead — steer straight at where it will be, foot flat. The
   // courier slows to ~170 for the corner turn, so a parked car that
   // lunges as it arrives meets it head-on.
-  const aimClose = predictPosition(courier, courierPos, p, playerTop);
+  const aimClose = leadPoint(courier, courierPos, p, playerTop);
   const diffClose = angleDiff(Math.atan2(aimClose.y - p.y, aimClose.x - p.x), heading);
   if (((dCorner < 90 && dCourier < 500)
     || (dCourier < 200 && Math.abs(diffClose) < 1.2))
@@ -1325,13 +1251,12 @@ export function update(G, dt) {
   const driving = isDriving(G);
 
   // Track stuckness: if we have not moved in 4 seconds while trying to
-  // reach something, clear the cached route and walk target.
+  // reach something, clear the cached route, the ambush cache and the
+  // walk target — a stale plan is what keeps the car grinding one wall.
   if (!state.lastPos || now - state.lastPosAt > 0.5) {
     if (state.lastPos && dist(p.x, p.y, state.lastPos.x, state.lastPos.y) < 6 && now - state.stuckSince > 4) {
       state.route = [];
-      state.chaseRoute = [];
-      state.chaseRouteDest = null;
-      state.chaseIntercept = null;
+      chaseReset(state);
       state.walkTarget = null;
       state.walkTargetPos = null;
       state.stuckSince = now;
@@ -1470,8 +1395,7 @@ export function update(G, dt) {
   // (G.missions.courier), not on the mission DEF — reading only the def
   // skipped this whole branch and the autopilot chased a stale objective
   // point instead of the moving car.
-  const courier = (mission && (mission.courier || mission.targetVehicle || mission.targetCar))
-    || (G.missions && G.missions.courier);
+  const courier = readCourier(G, mission);
   const isChase = /m2|tail|chase/.test(id) || !!courier;
   if (isChase && courier) {
     const courierPos = posOf(courier);
@@ -1486,9 +1410,9 @@ export function update(G, dt) {
         state.chaseStartAt = now;
       }
       // Swap cars only in the opening seconds, and only when the car
-      // we have cannot catch the courier at all (top speed under 430).
-      // Once the chase is on, every detour to a parked car is distance
-      // the courier never gives back.
+      // we have cannot catch the courier at all. Once the chase is on,
+      // every detour to a parked car is distance the courier never
+      // gives back.
       if (driving && now - state.lastSwapCheckAt > 1) {
         state.lastSwapCheckAt = now;
         const current = playerVehicle(G);
