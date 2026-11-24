@@ -243,11 +243,21 @@ function spawnForWanted(G, stars, px, py) {
   }
 }
 
+// During a shootout mission the police hold the ring instead of piling
+// into the arena. Accept the few shapes the missions module may use.
+function shootoutActive(G) {
+  const ms = G.missions;
+  if (!ms || typeof ms !== 'object') return false;
+  const cur = ms.current || ms.active || null;
+  if (!cur) return false;
+  if (typeof cur === 'string') return cur === 'm8' || cur === 'm10' || cur === 'm12';
+  if (typeof cur !== 'object') return false;
+  if (cur.shootout === true || cur.arena === true) return true;
+  const id = cur.id || cur.missionId || '';
+  return id === 'm8' || id === 'm10' || id === 'm12';
+}
+
 function updateFootCop(G, cop, dt, px, py, onFoot, pSpeed) {
-  // Perimeter: hold a ring slot around the player instead of piling on.
-  const tx = px + Math.cos(cop.slotAngle) * RING_RADIUS;
-  const ty = py + Math.sin(cop.slotAngle) * RING_RADIUS;
-  const dTarget = dist(cop.x, cop.y, tx, ty);
   const dPlayer = dist(cop.x, cop.y, px, py);
   if (cop.leaving) {
     const a = angleTo(px, py, cop.x, cop.y); // walk away from the player
@@ -257,8 +267,29 @@ function updateFootCop(G, cop, dt, px, py, onFoot, pSpeed) {
     cop.speed = FOOT_COP_SPEED;
     return;
   }
-  if (dTarget > 12) {
-    const a = angleTo(cop.x, cop.y, tx, ty);
+  // Perimeter vs chase: hold a ring slot around the player when the
+  // player is in a car (cops cannot arrest a driver) or during a
+  // shootout (never pile onto one spot). On foot otherwise, chase the
+  // player down — a cop that only ever held the ring could never get
+  // within arrest range.
+  if (!onFoot || shootoutActive(G)) {
+    const tx = px + Math.cos(cop.slotAngle) * RING_RADIUS;
+    const ty = py + Math.sin(cop.slotAngle) * RING_RADIUS;
+    const dTarget = dist(cop.x, cop.y, tx, ty);
+    if (dTarget > 12) {
+      const a = angleTo(cop.x, cop.y, tx, ty);
+      cop.x += Math.cos(a) * FOOT_COP_SPEED * dt;
+      cop.y += Math.sin(a) * FOOT_COP_SPEED * dt;
+      cop.angle = a;
+      cop.speed = FOOT_COP_SPEED;
+    } else {
+      cop.speed = 0;
+    }
+    cop.arrestTimer = 0;
+    return;
+  }
+  if (dPlayer > 24) {
+    const a = angleTo(cop.x, cop.y, px, py);
     cop.x += Math.cos(a) * FOOT_COP_SPEED * dt;
     cop.y += Math.sin(a) * FOOT_COP_SPEED * dt;
     cop.angle = a;
@@ -267,7 +298,7 @@ function updateFootCop(G, cop, dt, px, py, onFoot, pSpeed) {
     cop.speed = 0;
   }
   // Arrest: only a foot cop, only a slow on-foot player, only 1.2s in a row.
-  if (onFoot && pSpeed < ARREST_MAX_PLAYER_SPEED && dPlayer <= ARREST_RANGE) {
+  if (pSpeed < ARREST_MAX_PLAYER_SPEED && dPlayer <= ARREST_RANGE) {
     cop.arrestTimer += dt;
     if (cop.arrestTimer >= ARREST_TIME) {
       arrestPlayer(G);
