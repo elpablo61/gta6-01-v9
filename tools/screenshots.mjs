@@ -116,8 +116,9 @@ function startServer(port) {
         if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
           filePath = path.join(filePath, 'index.html');
         }
+        const data = fs.readFileSync(filePath);
         res.writeHead(200, { 'content-type': MIME[path.extname(filePath)] || 'application/octet-stream' });
-        res.end(fs.readFileSync(filePath));
+        res.end(data);
       } catch {
         res.writeHead(404);
         res.end('not found');
