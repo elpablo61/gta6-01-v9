@@ -652,8 +652,18 @@ function driveToward(G, state, target, cruise, opts) {
     keys.release('KeyW');
     keys.release('KeyS');
     steerToward(keys, diff);
-    // Crawl forward while rotating so the car keeps a little authority.
-    if (speed < 25) keys.hold('KeyW');
+    // Crawl forward while rotating so the car keeps a little authority —
+    // but only into open space. With the nose against a building the
+    // forward creep grinds the car against the wall and the nose barely
+    // turns (B13 probe: 22s at v=8-15, angle +0.23 rad, four beaching
+    // episodes of 3-20s in recovery). Back out instead: reversing while
+    // steering turns the nose the same way, so the car backs out of the
+    // block while still rotating toward the target. Same rule the
+    // steerAndThrottle rotate branch already uses.
+    if (speed < 25) {
+      if (noseClear(G, p, heading)) keys.hold('KeyW');
+      else keys.hold('KeyS');
+    }
     state.dbgDrive = speed < 25 ? 'rotate-creep' : 'rotate';
     return true;
   }
@@ -901,8 +911,21 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
     // drops to ~7 u/s. At 110 the radius is ~46 and the car turns
     // inside the junction instead of past it; the courier is capped
     // the same way, so the chase loses seconds at a turn rather than ten.
-    if (turn > 1.5 && wpDist < 400) cap = Math.min(cap, 110);
-    else if (turn > 0.9 && wpDist < 350) cap = Math.min(cap, 180);
+    // B14: the old fixed windows (350/400) were shorter than the
+    // braking distance at chase speed — drag is 260/s^2, so 420 -> 180
+    // needs ~277 units, and the car still arrived at the junction at
+    // ~180 (radius ~81, wider than the road), plowed through the
+    // corner into the block, and stopped off-road (B13 probe t=140
+    // and t=159: brake-cap at v=372-381, v=10 off-road a second
+    // later, then a 4s recovery grind). The window is now the braking
+    // distance from the current speed down to the cap plus a 150-unit
+    // margin, and the 90-degree cap drops 180 -> 140 (radius ~63,
+    // inside the junction box with the lookahead steering).
+    const brakeDist = (from, to) => (from > to ? (from * from - to * to) / 520 : 0);
+    let turnCap = cruise;
+    if (turn > 1.5) turnCap = 110;
+    else if (turn > 0.9) turnCap = 140;
+    if (turnCap < cruise && wpDist < brakeDist(mag, turnCap) + 150) cap = turnCap;
   }
   if (mag > cap) {
     // DRAG-BRAKE (B12): release the throttle AND the S key. S does
@@ -1227,7 +1250,7 @@ function lookaheadPoint(p, route, lookahead) {
 // the road polyline at a speed-scaled lookahead (90-220 units) from
 // the car's projection onto it, so the car starts its turn before
 // the junction and arcs through it instead of stopping to rotate —
-// the road-mode caps in steerAndThrottle (180 for a 90-degree turn,
+// the road-mode caps in steerAndThrottle (140 for a 90-degree turn,
 // 110 for a hairpin) keep the speed inside the turning radius.
 // No stop-and-rotate while moving on this path.
 function driveChaseFast(G, state, target, cruise) {
