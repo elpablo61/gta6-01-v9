@@ -611,7 +611,25 @@ function driveToward(G, state, target, cruise) {
   else { keys.release('KeyA'); keys.release('KeyD'); }
 
   // Brake ahead of a sharp turn, otherwise throttle toward cruise speed.
-  const needBrake = Math.abs(diff) > 0.55 && speed > 180;
+  // Two gaps the old check had (m1 stage 1 stalled in a loop at the
+  // market junction, hp 46 -> 2 grinding a building): it only braked
+  // when already facing the turn (|diff| > 0.55) at speed > 180, and it
+  // never looked at the turn AFTER the current waypoint. A car arriving
+  // at a 90-degree junction at ~178 u/s faced the turn too late, in the
+  // dead zone where it was too fast for the stop-and-rotate branch
+  // (> 140) but under the brake threshold, so it held full throttle
+  // through the turn, overshot the junction north into the building,
+  // wedged, and the stuck-handler recompute sent it back west to retry
+  // the same trap forever. Brake early for a sharp turn AT the waypoint
+  // (incoming leg vs outgoing leg), and brake for any sharp facing turn
+  // above 120 so speed is under 140 when the rotate branch takes over.
+  const nextWp = state.route[1] || target;
+  const inAngle = Math.atan2(waypoint.y - p.y, waypoint.x - p.x);
+  const outAngle = Math.atan2(nextWp.y - waypoint.y, nextWp.x - waypoint.x);
+  const turnAtWp = Math.abs(angleDiff(outAngle, inAngle));
+  const wpDist = dist(p.x, p.y, waypoint.x, waypoint.y);
+  const needBrake = (Math.abs(diff) > 0.55 && speed > 120)
+    || (turnAtWp > 0.9 && wpDist < 260 && speed > 60);
   const closeIn = distance < 140;
   if (needBrake || closeIn) {
     keys.release('KeyW');
