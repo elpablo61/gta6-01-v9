@@ -210,6 +210,7 @@ function expose(G) {
   G.missions = {
     list: MISSION_DEFS,
     get index() { return S.index; },
+    set index(v) { if (typeof v === 'number' && v >= 0 && v < MISSION_DEFS.length) S.index = v; },
     get active() { return S.active; },
     get stage() { return S.stage; },
     get status() { return S.status; },

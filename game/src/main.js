@@ -77,12 +77,16 @@ export function createGame() {
 }
 
 // Call a module hook only if it exists; log each distinct failure once.
+// The hook receives exactly the contract arguments (G), (G, dt) or
+// (G, ctx) — the call sites already pass G, so it is NOT passed again
+// here (passing it twice gave every module (G, G, dt) and broke the
+// canvas + all timers: draw got G as its ctx, update got G as its dt).
 function callHook(G, mod, hook, ...args) {
   if (!mod) return;
   const fn = mod[hook];
   if (typeof fn !== 'function') return;
   try {
-    fn(G, ...args);
+    fn(...args);
   } catch (err) {
     const key = `${hook}:${err && err.message}`;
     if (!G._errorLogged.has(key)) {
@@ -203,8 +207,12 @@ function wireOverlays(G) {
   });
   on('quit-btn', () => { G.state = 'title'; hideAllOverlays(); show('title-screen'); refreshSlots(G); });
   on('accept-btn', () => {
-    const dlg = G.missions && G.missions.dialog;
-    if (dlg && typeof dlg.accept === 'function') dlg.accept();
+    // The dialog object itself has no accept method; the mission module
+    // owns acceptance (it starts the offered mission from its own state).
+    const missions = moduleByName(G, 'missions');
+    try {
+      if (missions && typeof missions.acceptDialog === 'function') missions.acceptDialog(G);
+    } catch (err) { console.error('[main] accept failed:', err); }
     hide('mission-dialog');
     if (G.state === 'dialog') G.state = 'playing';
   });
@@ -223,6 +231,31 @@ function wireOverlays(G) {
       });
     });
   });
+}
+
+// ---- Mission dialog sync ------------------------------------------------
+// The mission module owns the dialog state (S.dialog) but nothing ever
+// showed it: no code set G.state to 'dialog' or filled the DOM, so the
+// fixer dialog could never appear. Each frame, mirror the mission
+// module's dialog into the #mission-dialog overlay and G.state.
+function syncMissionDialog(G) {
+  const m = G.missions;
+  const dlg = m && m.dialog;
+  const el = document.getElementById('mission-dialog');
+  if (!el) return;
+  if (dlg && G.state === 'playing') {
+    const fixer = document.getElementById('mission-fixer');
+    const title = document.getElementById('mission-title');
+    const text = document.getElementById('mission-text');
+    if (fixer) fixer.textContent = dlg.fixer || 'Mara';
+    if (title) title.textContent = dlg.name || '';
+    if (text) text.textContent = dlg.text || '';
+    el.hidden = false;
+    G.state = 'dialog';
+  } else if (!dlg && G.state === 'dialog') {
+    el.hidden = true;
+    G.state = 'playing';
+  }
 }
 
 export function startNewGame(G) {
@@ -269,6 +302,7 @@ export function startLoop(G) {
     const dt = Math.min(rawDt, 0.05); // clamp: a hiccup never jumps the sim
     resizeCanvas(G);
     updateAim(G);
+    syncMissionDialog(G);
     if (G.state === 'playing') {
       if (inputMod.pausePressed(G.input)) {
         G.state = 'paused'; show('pause-menu');
@@ -304,6 +338,7 @@ export function startLoop(G) {
 export async function boot() {
   const G = createGame();
   window.__crescentBay = G; // debug / playtest probes
+  window.__game = G; // debug hook: playtest probes read live state here
   inputMod.initInput(G.input, G.canvas);
   await loadLazyModules(G);
   initAll(G);
