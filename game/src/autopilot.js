@@ -806,6 +806,20 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
   const desired = Math.atan2(aim.y - p.y, aim.x - p.x);
   const diff = angleDiff(desired, heading);
 
+  // Facing the wrong way at speed: brake in a straight line first.
+  // Steering while braking at 300+ arcs the car off the road into a
+  // block — the probe watched the car brake-turn north into the block
+  // above (1800,1000) at the m2 start and sit wedged there for 30
+  // seconds. No steering while the speed is high; once slow, the
+  // rotate-in-place branch below takes over.
+  if (Math.abs(diff) > 1.5 && Math.abs(speed) > 60) {
+    keys.release('KeyA');
+    keys.release('KeyD');
+    keys.release('KeyW');
+    keys.hold('KeyS');
+    return;
+  }
+
   if (Math.abs(diff) > 1.2 && Math.abs(speed) < 50) {
     keys.release('KeyW');
     keys.release('KeyS');
