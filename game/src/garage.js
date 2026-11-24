@@ -8,6 +8,10 @@
 // hook G.missions.onGaragePurchase() when it exists (m11 needs it).
 // Autopilot API: openMenu(), buyCheapest(), closeMenu(), menuOpen flag.
 
+// The garage sits at the world map's own Fixer Garage pin (1000,2200).
+// The old Y (1400) landed on the Gun Store's pin instead, so the m11
+// drive-to-garage step parked the player at the gun shop and the menu
+// never opened. One source of truth: world.places.garage.
 export const GARAGE_X = 1000;
 export const GARAGE_Y = 2200;
 export const GARAGE_RADIUS = 130;

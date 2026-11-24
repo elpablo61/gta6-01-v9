@@ -84,16 +84,19 @@ function clampToWorld(G, x, y) {
   return { x: clamp(x, 20, b.w - 20), y: clamp(y, 20, b.h - 20) };
 }
 
-// The Spray Shop location is owned by the world module; look for it in the
-// few shapes it may take and give up gracefully if it is not there yet.
+// The Spray Shop location is owned by the world module, and the world
+// keeps named places in one map (world.places) — that map is the first
+// place to look. Older flat fields are kept as fallbacks only, so a
+// rename in one module cannot silently strand the escape driver.
 function findSprayShop(G) {
   const w = G.world || {};
+  const places = w.places || {};
   const cands = [
+    places.sprayShop,
+    places.spray,
     w.sprayShop,
     w.spray,
     G.sprayShop,
-    w.places && w.places.sprayShop,
-    w.places && w.places.spray,
     w.locations && w.locations.sprayShop,
     w.locations && w.locations.spray,
   ];

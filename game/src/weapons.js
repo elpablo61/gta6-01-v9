@@ -247,7 +247,9 @@ export function spawnArenaCrates(G, cx, cy) {
 }
 
 // Fixed world crates: SMG at the gun store, shotgun at the docks,
-// SMG again at the hideout. Seeded once.
+// SMG again at the hideout. Seeded once. The place keys must match
+// world.places exactly (camelCase 'gunStore'): the old lowercase key
+// missed the map and the fallback put the SMG crate at the club.
 function seedWorldCrates(G) {
   const w = ensureWeapons(G);
   if (w._cratesSeeded) return;

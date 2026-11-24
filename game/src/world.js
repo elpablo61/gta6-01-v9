@@ -159,16 +159,20 @@ export function buildWorld(rng) {
     // Marina pier juts east into the water.
     pier: { x: 3000, y: 2140, w: 180, h: 120 },
   };
-  // Routing helpers live on the world object itself: the autopilot (and
-  // any other module) looks them up as world.findRoute /
-  // world.nearestRoadPoint, and without them it silently falls back to
-  // straight lines straight across building blocks (the spec requires
-  // road-graph routes with the first junction as first waypoint).
-  world.findRoute = (sx, sy, tx, ty) => findRoute(world, sx, sy, tx, ty);
-  world.nearestRoadPoint = (x, y) => nearestRoadPoint(world, x, y);
-  world.nearestJunction = (x, y) => nearestJunction(world, x, y);
-  world.pointInBuilding = (x, y, pad) => pointInBuilding(world, x, y, pad);
-  world.isOnRoad = (x, y) => isOnRoad(world, x, y);
+  // The road-graph queries live on the world object itself, bound to
+  // this world: the autopilot calls world.findRoute / world.isOnRoad
+  // and friends, and a world without them makes every driver fall back
+  // to straight lines across building blocks (the spec wants routes
+  // through junctions, never diagonals through blocks). One table keeps
+  // the method list in a single place instead of five loose lines.
+  const worldQueries = {
+    findRoute: (sx, sy, tx, ty) => findRoute(world, sx, sy, tx, ty),
+    nearestRoadPoint: (x, y) => nearestRoadPoint(world, x, y),
+    nearestJunction: (x, y) => nearestJunction(world, x, y),
+    pointInBuilding: (x, y, pad) => pointInBuilding(world, x, y, pad),
+    isOnRoad: (x, y) => isOnRoad(world, x, y),
+  };
+  for (const name of Object.keys(worldQueries)) world[name] = worldQueries[name];
   return world;
 }
 

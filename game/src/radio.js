@@ -44,16 +44,22 @@ function semitoneToFreq(root, semis) {
   return root * Math.pow(2, semis / 12);
 }
 
+// Edge detection for a key press, across every input shape the game
+// might expose. The live input object answers pressed(code) as a
+// function over its edge-triggered set; a Set-shaped check
+// (pressed.has) never matches that shape, so R silently did nothing
+// in the browser until the function shape was tried first.
 function justPressed(G, code) {
   const inp = G && G.input;
   if (!inp) return false;
-  // The input module exposes pressed() as a FUNCTION over the
-  // edge-triggered _pressed set — this is the shape the live game
-  // actually has. The old code only checked inp.pressed.has (a Set
-  // shape that never exists) and inp.rPressed (never set), so R could
-  // never cycle the station in the browser.
-  if (typeof inp.pressed === 'function') { try { return !!inp.pressed(code); } catch (e) { return false; } }
-  if (typeof inp.justPressed === 'function') { try { return !!inp.justPressed(code); } catch (e) { return false; } }
+  const tryFn = (fn) => {
+    if (typeof fn !== 'function') return null;
+    try { return !!fn(code); } catch { return false; }
+  };
+  let hit = tryFn(inp.pressed);
+  if (hit !== null) return hit;
+  hit = tryFn(inp.justPressed);
+  if (hit !== null) return hit;
   if (inp.pressed && typeof inp.pressed.has === 'function') return inp.pressed.has(code);
   if (inp.pressedKeys && typeof inp.pressedKeys.has === 'function') return inp.pressedKeys.has(code);
   if (code === 'KeyR' && inp.rPressed) return true;
