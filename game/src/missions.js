@@ -455,15 +455,21 @@ function pickCourierDest(G) {
   if (!c) return;
   const P = getPlayerPos(G);
   // Pick a far junction away from the player as the courier's target.
+  // Never the corner the courier is already standing on: when the
+  // player sits far from that corner it stays the "farthest" pick, the
+  // courier's route becomes a single waypoint it accepts instantly,
+  // and it parks at the corner forever instead of running its route.
   const far = [
     { x: 3000, y: 3000 }, { x: 200, y: 3000 }, { x: 3000, y: 200 }, { x: 200, y: 200 },
     { x: 2600, y: 600 }, { x: 600, y: 2600 },
   ];
-  let best = far[0], bd = -1;
+  let best = null, bd = -1;
   for (const f of far) {
+    if (dist(f.x, f.y, c.x, c.y) < 800) continue; // too close to run to
     const d = dist(f.x, f.y, P.x, P.y);
     if (d > bd) { bd = d; best = f; }
   }
+  if (!best) best = far[0];
   c.destX = best.x; c.destY = best.y;
   c.routeDest = { x: best.x, y: best.y };
   c.route = findRoute(c.x, c.y, best.x, best.y);
@@ -481,16 +487,49 @@ function updateCourier(G, dt) {
   const wp = c.route[0];
   if (wp) {
     const d = dist(c.x, c.y, wp.x, wp.y);
-    if (d < 40) { c.route.shift(); }
-    else {
+    // Accept the waypoint once inside a radius that grows with speed,
+    // or once the courier has driven past it at close range: the
+    // past-plane test must ALSO be close (d < 150) — a waypoint 400
+    // units away on the next leg sits behind the courier's nose while
+    // it is still turning toward it, and accepting it there burns the
+    // whole route without moving (the courier parked at a corner for
+    // 100+ seconds in the probe while its route cycled 1..14).
+    const ahead = (wp.x - c.x) * Math.cos(c.angle) + (wp.y - c.y) * Math.sin(c.angle);
+    if (d < Math.max(40, c.speed * 0.15) || (ahead < -20 && d < 150)) {
+      c.route.shift();
+    } else {
       const want = Math.atan2(wp.y - c.y, wp.x - c.x);
       let diff = want - c.angle;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
+      // The courier follows the same rule as every other car in the
+      // city: slow down before a sharp junction turn. At a flat 380
+      // it turns on a ~170-unit radius, cuts the corner through the
+      // block, and never gives the player a closing window; easing to
+      // 250 (sharp) / 170 (hairpin) ahead of the turn keeps it on the
+      // road and opens a window at every junction, without touching
+      // its 380 cruise on the straights or the 55% cut per ram hit.
+      let cap = c.cruise;
+      const absDiff = Math.abs(diff);
+      if (absDiff > 1.5) cap = Math.min(cap, 170);
+      else if (absDiff > 0.9) cap = Math.min(cap, 250);
+      const next = c.route[1];
+      if (next) {
+        const outAngle = Math.atan2(next.y - wp.y, next.x - wp.x);
+        let turnAhead = outAngle - want;
+        while (turnAhead > Math.PI) turnAhead -= Math.PI * 2;
+        while (turnAhead < -Math.PI) turnAhead += Math.PI * 2;
+        if (Math.abs(turnAhead) > 0.9 && d < 320) cap = Math.min(cap, 260);
+      }
       c.angle += clamp(diff, -2.2 * dt, 2.2 * dt);
-      c.speed += (c.cruise - c.speed) * Math.min(1, dt * 0.8);
+      c.speed += (cap - c.speed) * Math.min(1, dt * 1.2);
+      if (c.speed < 0) c.speed = 0;
       c.x += Math.cos(c.angle) * c.speed * dt;
       c.y += Math.sin(c.angle) * c.speed * dt;
+      // Safety net: never leave the world. A courier outside the map
+      // hands the autopilot a target no road route can reach.
+      c.x = clamp(c.x, 0, WORLD);
+      c.y = clamp(c.y, 0, WORLD);
     }
   }
   if (c.route.length === 0) pickCourierDest(G);
