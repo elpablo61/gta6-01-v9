@@ -20,6 +20,18 @@ export function createInput() {
     interact: false,    // E (held)
     radio: false,       // R (held)
     switchWeapon: false,// Q (held)
+    // Live set of held KeyboardEvent.code values, kept in sync by the
+    // listeners below. This is the shape the game modules read
+    // (player / weapons / garage / missions all read input.keys or
+    // input.isDown); without it, no module could ever see a key in
+    // the browser, because the directional aliases alone are not
+    // what their key readers check.
+    keys: new Set(),
+    // Mouse in canvas pixels, kept in sync by the listeners below.
+    // Modules read input.mouse (player aim/shoot, combat) as well as
+    // the flat mouseX / mouseY / mouseDown fields.
+    mouse: { x: 0, y: 0, down: false, clicked: false },
+    isDown(code) { return this.keys.has(code); },
     // Mouse aim, in canvas pixels (updated by mousemove).
     mouseX: 0, mouseY: 0,
     mouseDown: false,
@@ -31,7 +43,7 @@ export function createInput() {
     _pressed: new Set(),
     pressed(code) { return this._pressed.has(code); },
     consume(code) { this._pressed.delete(code); },
-    endFrame() { this._pressed.clear(); },
+    endFrame() { this._pressed.clear(); this.mouse.clicked = false; },
     // Normalised movement vector (-1..1 on each axis).
     moveVector() {
       const x = (this.right ? 1 : 0) - (this.left ? 1 : 0);
@@ -48,6 +60,7 @@ export function createInput() {
 export function initInput(input, canvas) {
   function onKeyDown(e) {
     if (e.repeat) return;
+    input.keys.add(e.code);
     const dir = MOVE_KEYS[e.code];
     if (dir) { input[dir] = true; e.preventDefault(); }
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') input.sprint = true;
@@ -61,6 +74,7 @@ export function initInput(input, canvas) {
     }
   }
   function onKeyUp(e) {
+    input.keys.delete(e.code);
     const dir = MOVE_KEYS[e.code];
     if (dir) input[dir] = false;
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') input.sprint = false;
@@ -72,19 +86,30 @@ export function initInput(input, canvas) {
     const rect = canvas.getBoundingClientRect();
     input.mouseX = e.clientX - rect.left;
     input.mouseY = e.clientY - rect.top;
+    input.mouse.x = input.mouseX;
+    input.mouse.y = input.mouseY;
   }
   function onMouseDown(e) {
-    if (e.button === 0) input.mouseDown = true;
+    if (e.button === 0) {
+      input.mouseDown = true;
+      input.mouse.down = true;
+      input.mouse.clicked = true;
+    }
     onMouseMove(e);
   }
   function onMouseUp(e) {
-    if (e.button === 0) input.mouseDown = false;
+    if (e.button === 0) {
+      input.mouseDown = false;
+      input.mouse.down = false;
+    }
   }
   function onBlur() {
     // Losing focus must never leave a key stuck down.
     input.up = input.down = input.left = input.right = false;
     input.sprint = input.interact = input.radio = input.switchWeapon = false;
     input.mouseDown = false;
+    input.mouse.down = false;
+    input.keys.clear();
     input._pressed.clear();
   }
   window.addEventListener('keydown', onKeyDown);
