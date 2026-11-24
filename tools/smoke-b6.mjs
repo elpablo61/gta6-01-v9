@@ -1,9 +1,12 @@
-// tools/smoke-b6.mjs — Node smoke test for the B6-FIX integration work:
+// tools/smoke-b6.mjs — Node smoke test for the B6-FIX integration work.
 //
-//   [1] main.js boots on stubs: every lazy module loads (no silent null),
-//       callHook passes (G)/(G,dt)/(G,ctx) exactly (no double-G), the
-//       frame loop draws with a real ctx, window.__game exists, and the
-//       shots pose hook is registered.
+// Seven sections, 62 checks, no browser, no canvas — a mock G plus the
+// REAL world module (seeded) and the REAL input module:
+//
+//   [1] main.js boots on stubs: every lazy module loads (no silent
+//       null), callHook passes (G)/(G,dt)/(G,ctx) exactly (no double-G),
+//       the frame loop draws with a real ctx, window.__game exists, and
+//       the shots pose hook is registered.
 //   [2] driving: E enters a car (nearestCar reads G.vehicles.list),
 //       W/S/A intent written by player.js moves the car through
 //       vehicles.js driveManual; the autopilot's virtual keys drive
@@ -18,32 +21,27 @@
 //       w.sprayShop): heat drains at (2600,600).
 //   [7] shots.js poses: cover / mission / start stage and report ready.
 //
-// Runs on a mock G with the REAL world module (seeded) and the REAL
-// input module — no browser, no canvas.
-//
 // Usage: node tools/smoke-b6.mjs   (exit 0 = all checks pass)
 
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SRC = path.join(__dirname, '..', 'game', 'src');
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SRC = path.join(HERE, '..', 'game', 'src');
 
 // ---------------------------------------------------------------------------
-// Browser stubs (installed BEFORE any game module is imported).
+// Browser stubs, installed BEFORE any game module is imported.
 // ---------------------------------------------------------------------------
 
 const ctxCalls = { fillRect: 0, fillText: 0, drawImage: 0, save: 0, total: 0 };
 
-function makeCtx() {
-  const grad = { addColorStop() {} };
+function fakeCtx() {
+  const gradient = { addColorStop() {} };
   const target = { canvas: { width: 1280, height: 720 } };
   return new Proxy(target, {
     get(t, prop) {
       if (prop in t) return t[prop];
-      if (prop === 'createRadialGradient' || prop === 'createLinearGradient') {
-        return () => grad;
-      }
+      if (prop === 'createRadialGradient' || prop === 'createLinearGradient') return () => gradient;
       if (prop === 'measureText') return () => ({ width: 10 });
       if (prop === 'getImageData') {
         return () => ({ data: new Uint8ClampedArray(4), width: 1, height: 1 });
@@ -58,10 +56,10 @@ function makeCtx() {
   });
 }
 
-const sharedCtx = makeCtx();
+const sharedCtx = fakeCtx();
 
-function makeElement(tag) {
-  const el = {
+function fakeEl(tag) {
+  return {
     tagName: (tag || 'div').toUpperCase(),
     style: {},
     textContent: '',
@@ -73,9 +71,7 @@ function makeElement(tag) {
     offsetParent: null,
     dataset: {},
     children: [],
-    classList: {
-      add() {}, remove() {}, toggle() {}, contains() { return false; },
-    },
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
     appendChild(child) { this.children.push(child); return child; },
     removeChild() {},
     addEventListener() {},
@@ -83,26 +79,25 @@ function makeElement(tag) {
     setAttribute() {},
     getAttribute() { return null; },
     getContext() { return sharedCtx; },
-    getBoundingClientRect() {
-      return { left: 0, top: 0, width: 1280, height: 720 };
-    },
+    getBoundingClientRect() { return { left: 0, top: 0, width: 1280, height: 720 }; },
     focus() {},
     click() {},
   };
-  return el;
 }
 
-const storageMap = new Map();
-const localStorageStub = {
-  getItem(k) { return storageMap.has(k) ? storageMap.get(k) : null; },
-  setItem(k, v) { storageMap.set(k, String(v)); },
-  removeItem(k) { storageMap.delete(k); },
-  clear() { storageMap.clear(); },
-  key(i) { return [...storageMap.keys()][i] || null; },
-  get length() { return storageMap.size; },
-};
+function fakeStorage() {
+  const map = new Map();
+  return {
+    getItem(k) { return map.has(k) ? map.get(k) : null; },
+    setItem(k, v) { map.set(k, String(v)); },
+    removeItem(k) { map.delete(k); },
+    clear() { map.clear(); },
+    key(i) { return [...map.keys()][i] || null; },
+    get length() { return map.size; },
+  };
+}
 
-class AudioParamStub {
+class FakeAudioParam {
   constructor() { this.value = 0; }
   setValueAtTime() {}
   linearRampToValueAtTime() {}
@@ -110,11 +105,11 @@ class AudioParamStub {
   cancelScheduledValues() {}
 }
 
-class AudioNodeStub {
+class FakeAudioNode {
   constructor() {
-    this.gain = new AudioParamStub();
-    this.frequency = new AudioParamStub();
-    this.detune = new AudioParamStub();
+    this.gain = new FakeAudioParam();
+    this.frequency = new FakeAudioParam();
+    this.detune = new FakeAudioParam();
     this.type = 'sine';
     this.frequencyBinCount = 64;
     this.fftSize = 128;
@@ -127,71 +122,76 @@ class AudioNodeStub {
   getByteTimeDomainData() {}
 }
 
-class AudioContextStub {
+class FakeAudioContext {
   constructor() {
     this.currentTime = 0;
     this.sampleRate = 44100;
     this.state = 'running';
-    this.destination = new AudioNodeStub();
+    this.destination = new FakeAudioNode();
   }
   resume() { return Promise.resolve(); }
   suspend() { return Promise.resolve(); }
   close() { return Promise.resolve(); }
-  createOscillator() { return new AudioNodeStub(); }
-  createGain() { return new AudioNodeStub(); }
-  createBufferSource() { return new AudioNodeStub(); }
-  createBiquadFilter() { return new AudioNodeStub(); }
-  createDelay() { return new AudioNodeStub(); }
-  createDynamicsCompressor() { return new AudioNodeStub(); }
-  createAnalyser() { return new AudioNodeStub(); }
+  createOscillator() { return new FakeAudioNode(); }
+  createGain() { return new FakeAudioNode(); }
+  createBufferSource() { return new FakeAudioNode(); }
+  createBiquadFilter() { return new FakeAudioNode(); }
+  createDelay() { return new FakeAudioNode(); }
+  createDynamicsCompressor() { return new FakeAudioNode(); }
+  createAnalyser() { return new FakeAudioNode(); }
   createBuffer() { return { getChannelData: () => new Float32Array(128) }; }
   decodeAudioData() { return Promise.resolve({}); }
 }
 
-const documentStub = {
-  createElement: (tag) => makeElement(tag),
-  getElementById: () => makeElement('div'),
-  querySelector: () => makeElement('div'),
-  querySelectorAll: () => [],
-  getElementsByTagName: () => [],
-  addEventListener() {},
-  removeEventListener() {},
-  body: makeElement('body'),
-  activeElement: null,
-  hidden: false,
-  title: 'Crescent Bay',
-};
-
-const windowStub = {
-  addEventListener() {},
-  removeEventListener() {},
-  dispatchEvent() { return true; },
-  innerWidth: 1280,
-  innerHeight: 720,
-  devicePixelRatio: 1,
-  localStorage: localStorageStub,
-  AudioContext: AudioContextStub,
-  webkitAudioContext: AudioContextStub,
-  requestAnimationFrame: (cb) => setTimeout(() => cb(0), 16),
-  cancelAnimationFrame: (id) => clearTimeout(id),
-  location: { href: 'http://localhost/', pathname: '/', search: '' },
-  document: documentStub,
-};
-
-globalThis.window = windowStub;
-globalThis.document = documentStub;
-globalThis.localStorage = localStorageStub;
-globalThis.AudioContext = AudioContextStub;
-globalThis.webkitAudioContext = AudioContextStub;
-if (typeof globalThis.requestAnimationFrame !== 'function') {
-  globalThis.requestAnimationFrame = windowStub.requestAnimationFrame;
+function installStubs() {
+  const storage = fakeStorage();
+  const doc = {
+    createElement: (tag) => fakeEl(tag),
+    getElementById: () => fakeEl('div'),
+    querySelector: () => fakeEl('div'),
+    querySelectorAll: () => [],
+    getElementsByTagName: () => [],
+    addEventListener() {},
+    removeEventListener() {},
+    body: fakeEl('body'),
+    activeElement: null,
+    hidden: false,
+    title: 'Crescent Bay',
+  };
+  const win = {
+    addEventListener() {},
+    removeEventListener() {},
+    dispatchEvent() { return true; },
+    innerWidth: 1280,
+    innerHeight: 720,
+    devicePixelRatio: 1,
+    localStorage: storage,
+    AudioContext: FakeAudioContext,
+    webkitAudioContext: FakeAudioContext,
+    requestAnimationFrame: (cb) => setTimeout(() => cb(0), 16),
+    cancelAnimationFrame: (id) => clearTimeout(id),
+    location: { href: 'http://localhost/', pathname: '/', search: '' },
+    document: doc,
+  };
+  globalThis.window = win;
+  globalThis.document = doc;
+  globalThis.localStorage = storage;
+  globalThis.AudioContext = FakeAudioContext;
+  globalThis.webkitAudioContext = FakeAudioContext;
+  if (typeof globalThis.requestAnimationFrame !== 'function') {
+    globalThis.requestAnimationFrame = win.requestAnimationFrame;
+  }
 }
 
+installStubs();
+
 // ---------------------------------------------------------------------------
-// Harness.
+// Harness: one results list, sections run in order, a failing section
+// never stops the later ones.
 // ---------------------------------------------------------------------------
 
 const results = [];
+
 function check(name, ok, detail) {
   results.push({ name, ok: !!ok, detail: detail || '' });
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ' — ' + detail : ''}`);
@@ -206,16 +206,75 @@ function angleDiff(a, b) {
   return d;
 }
 
+async function runSection(title, fn) {
+  console.log(`\n${title}`);
+  try {
+    await fn();
+  } catch (e) {
+    check(`${title} (section crashed)`, false, String((e && e.stack) || e));
+  }
+}
+
+// A fresh mock G for the driving / combat sections: real world + real
+// input, everything else plain data. Each G gets a FRESH seeded RNG so
+// every section sees the same deterministic world.
+function makeG(inputMod, rng) {
+  return {
+    rng: rng.createRng(20261118),
+    world: null,
+    player: {
+      x: 200, y: 200, angle: 0, speed: 0,
+      health: 100, maxHealth: 100, hp: 100,
+      onFoot: true, inCar: false, driving: false,
+      car: null, vehicle: null, currentCar: null,
+      cash: 0, weapon: 'pistol', ammo: 48, radius: 14,
+      caught: false, dead: false,
+    },
+    vehicles: [],
+    traffic: [],
+    peds: [], pedestrians: [],
+    police: [],
+    heli: null, enemies: [], bullets: [], pickups: [], crates: [],
+    missions: { current: null, active: null, list: [], stage: 0, index: 0, dialog: null, dialogOpen: false, objective: null },
+    time: { t: 0, hour: 12, hours: 12, minute: 0, day: 1, night: false },
+    heat: 0, wanted: 0, cash: 0,
+    camera: { x: 200, y: 200, zoom: 1 },
+    input: inputMod.createInput(),
+    audio: {}, save: { activeSlot: 0 },
+    gameOver: null, caught: false, paused: false,
+    width: 1280, height: 720, viewW: 1280, viewH: 720,
+  };
+}
+
+function stepDriving(G, mods, frames) {
+  for (let i = 0; i < frames; i += 1) {
+    mods.vehicles.update(G, 1 / 60);
+    mods.traffic.update(G, 1 / 60);
+    mods.player.update(G, 1 / 60);
+    G.input.endFrame();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sections.
+// ---------------------------------------------------------------------------
+
 async function main() {
   console.log('B6 smoke test — mock G, real world + real input, Node, no browser');
-  let allOk = true;
 
-  // ---------------------------------------------------------------- [1]
-  console.log('\n[1] main.js boots: lazy modules load, callHook arity, live draw');
-  let bootG = null;
-  try {
+  const random = await import(path.join(SRC, 'random.js'));
+  const worldMod = await import(path.join(SRC, 'world.js'));
+  const inputMod = await import(path.join(SRC, 'input.js'));
+  const vehiclesMod = await import(path.join(SRC, 'vehicles.js'));
+  const trafficMod = await import(path.join(SRC, 'traffic.js'));
+  const playerMod = await import(path.join(SRC, 'player.js'));
+  const mods = { world: worldMod, vehicles: vehiclesMod, traffic: trafficMod, player: playerMod };
+  const rng = random; // the module itself: makeG seeds a fresh RNG per G
+
+  await runSection('[1] main.js boots: lazy modules load, callHook arity, live draw', async () => {
+    let bootG = null;
     await import(path.join(SRC, 'main.js'));
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 50; i += 1) {
       await sleep(100);
       bootG = globalThis.window.__game;
       if (bootG && bootG.modules && bootG.modules.shots) break;
@@ -236,64 +295,23 @@ async function main() {
     check('no module hook failed (callHook _errorLogged empty)',
       !!(bootG && bootG._errorLogged && bootG._errorLogged.size === 0),
       `errors=${bootG && bootG._errorLogged ? [...bootG._errorLogged].join(' | ') : 'n/a'}`);
-  } catch (e) {
-    check('main.js boot', false, String((e && e.stack) || e));
-  }
+  });
 
-  // ---------------------------------------------------------------- shared
-  const random = await import(path.join(SRC, 'random.js'));
-  const worldMod = await import(path.join(SRC, 'world.js'));
-  const inputMod = await import(path.join(SRC, 'input.js'));
-  const vehiclesMod = await import(path.join(SRC, 'vehicles.js'));
-  const trafficMod = await import(path.join(SRC, 'traffic.js'));
-  const playerMod = await import(path.join(SRC, 'player.js'));
-
-  function makeDriveG() {
-    return {
-      rng: random.createRng(20261118),
-      world: null,
-      player: {
-        x: 200, y: 200, angle: 0, speed: 0,
-        health: 100, maxHealth: 100, hp: 100,
-        onFoot: true, inCar: false, driving: false,
-        car: null, vehicle: null, currentCar: null,
-        cash: 0, weapon: 'pistol', ammo: 48, radius: 14,
-        caught: false, dead: false,
-      },
-      vehicles: [],
-      traffic: [],
-      peds: [], pedestrians: [],
-      police: [],
-      heli: null, enemies: [], bullets: [], pickups: [], crates: [],
-      missions: { current: null, active: null, list: [], stage: 0, index: 0, dialog: null, dialogOpen: false, objective: null },
-      time: { t: 0, hour: 12, hours: 12, minute: 0, day: 1, night: false },
-      heat: 0, wanted: 0, cash: 0,
-      camera: { x: 200, y: 200, zoom: 1 },
-      input: inputMod.createInput(),
-      audio: {}, save: { activeSlot: 0 },
-      gameOver: null, caught: false, paused: false,
-      width: 1280, height: 720, viewW: 1280, viewH: 720,
-    };
-  }
-
-  function initDriveWorld(G) {
+  await runSection('[2] driving: E enters a car, W/S/A intent moves it', async () => {
+    const G = makeG(inputMod, rng);
     worldMod.init(G);
     vehiclesMod.init(G);
     trafficMod.init(G);
     playerMod.init(G);
-  }
-
-  // ---------------------------------------------------------------- [2]
-  console.log('\n[2] driving: E enters a car, W/S/A intent moves it');
-  try {
-    const G = makeDriveG();
-    initDriveWorld(G);
     check('traffic seeded into G.vehicles.list', G.vehicles.list.length >= 10,
       `cars=${G.vehicles.list.length}`);
     const car = G.vehicles.list[0];
-    const startX = car.x, startY = car.y;
-    G.player.x = car.x; G.player.y = car.y;
-    G.camera.x = car.x; G.camera.y = car.y;
+    const startX = car.x;
+    const startY = car.y;
+    G.player.x = car.x;
+    G.player.y = car.y;
+    G.camera.x = car.x;
+    G.camera.y = car.y;
     G.input.keys.add('KeyE');
     playerMod.update(G, 1 / 60);
     G.input.keys.delete('KeyE');
@@ -302,52 +320,39 @@ async function main() {
       `inCar=${G.player.inCar} driver=${car.driver}`);
     // Hold W for 2 s (vehicles before player, like main.js MODULE_ORDER).
     G.input.keys.add('KeyW');
-    for (let i = 0; i < 120; i++) {
-      vehiclesMod.update(G, 1 / 60);
-      trafficMod.update(G, 1 / 60);
-      playerMod.update(G, 1 / 60);
-      G.input.endFrame();
-    }
+    stepDriving(G, mods, 120);
     const moved = Math.hypot(car.x - startX, car.y - startY);
     check('W builds speed and moves the car', car.speed > 100 && moved > 100,
       `speed=${car.speed.toFixed(0)} moved=${moved.toFixed(0)}`);
     // Steer left for 1 s.
     const angleBefore = car.angle;
     G.input.keys.add('KeyA');
-    for (let i = 0; i < 60; i++) {
-      vehiclesMod.update(G, 1 / 60);
-      trafficMod.update(G, 1 / 60);
-      playerMod.update(G, 1 / 60);
-      G.input.endFrame();
-    }
+    stepDriving(G, mods, 60);
     const turned = angleDiff(angleBefore, car.angle);
     check('A turns the car left', turned < -0.2, `dAngle=${turned.toFixed(2)}`);
     // S brakes (then reverses): speed must fall well below cruise.
     G.input.keys.delete('KeyW');
     G.input.keys.delete('KeyA');
     G.input.keys.add('KeyS');
-    for (let i = 0; i < 120; i++) {
-      vehiclesMod.update(G, 1 / 60);
-      trafficMod.update(G, 1 / 60);
-      playerMod.update(G, 1 / 60);
-      G.input.endFrame();
-    }
+    stepDriving(G, mods, 120);
     check('S brakes the car down', car.speed < 50, `speed=${car.speed.toFixed(0)}`);
     G.input.keys.delete('KeyS');
-  } catch (e) {
-    check('manual driving sequence', false, String((e && e.stack) || e));
-  }
+  });
 
-  // ---------------------------------------------------------------- [2b]
-  console.log('\n[2b] autopilot virtual keys drive the car the same way');
-  try {
+  await runSection('[2b] autopilot virtual keys drive the car the same way', async () => {
     const autopilotMod = await import(path.join(SRC, 'autopilot.js'));
-    const G = makeDriveG();
-    initDriveWorld(G);
+    const G = makeG(inputMod, rng);
+    worldMod.init(G);
+    vehiclesMod.init(G);
+    trafficMod.init(G);
+    playerMod.init(G);
     const car = G.vehicles.list[0];
-    const startX = car.x, startY = car.y;
-    G.player.x = car.x; G.player.y = car.y;
-    G.camera.x = car.x; G.camera.y = car.y;
+    const startX = car.x;
+    const startY = car.y;
+    G.player.x = car.x;
+    G.player.y = car.y;
+    G.camera.x = car.x;
+    G.camera.y = car.y;
     G.input.keys.add('KeyE');
     playerMod.update(G, 1 / 60);
     G.input.keys.delete('KeyE');
@@ -356,7 +361,7 @@ async function main() {
     autopilotMod.init(G);
     G.autopilotEnabled = true;
     let maxSpeed = 0;
-    for (let i = 0; i < 180; i++) {
+    for (let i = 0; i < 180; i += 1) {
       autopilotMod.update(G, 1 / 60);
       vehiclesMod.update(G, 1 / 60);
       trafficMod.update(G, 1 / 60);
@@ -370,16 +375,12 @@ async function main() {
     check('autopilot route follows the road graph (not a straight cut)',
       !!G.autopilot && Array.isArray(G.autopilot.route),
       `routeLen=${G.autopilot && G.autopilot.route ? G.autopilot.route.length : 'n/a'}`);
-  } catch (e) {
-    check('autopilot driving sequence', false, String((e && e.stack) || e));
-  }
+  });
 
-  // ---------------------------------------------------------------- [3]
-  console.log('\n[3] garage position vs world.places; weapon crates');
-  try {
+  await runSection('[3] garage position vs world.places; weapon crates', async () => {
     const garageMod = await import(path.join(SRC, 'garage.js'));
     const weaponsMod = await import(path.join(SRC, 'weapons.js'));
-    const G = makeDriveG();
+    const G = makeG(inputMod, rng);
     worldMod.init(G);
     garageMod.init(G);
     weaponsMod.init(G);
@@ -399,20 +400,16 @@ async function main() {
     check('no other marker within 150 of the garage', nearestOther > 150,
       `nearest=${nearestName} ${nearestOther.toFixed(0)}`);
     const crates = G.weapons.crates;
-    const has = (weapon, x, y) => crates.some((c) => c.weapon === weapon && c.x === x && c.y === y);
-    check('SMG crate at the gun store (1000,1400)', has('smg', 1000, 1400),
+    const hasCrate = (weapon, x, y) => crates.some((c) => c.weapon === weapon && c.x === x && c.y === y);
+    check('SMG crate at the gun store (1000,1400)', hasCrate('smg', 1000, 1400),
       `crates=${JSON.stringify(crates.map((c) => [c.weapon, c.x, c.y]))}`);
-    check('shotgun crate at the docks (2200,3000)', has('shotgun', 2200, 3000));
-    check('SMG crate at the hideout (600,2600)', has('smg', 600, 2600));
-  } catch (e) {
-    check('garage / crates sequence', false, String((e && e.stack) || e));
-  }
+    check('shotgun crate at the docks (2200,3000)', hasCrate('shotgun', 2200, 3000));
+    check('SMG crate at the hideout (600,2600)', hasCrate('smg', 600, 2600));
+  });
 
-  // ---------------------------------------------------------------- [4]
-  console.log('\n[4] weapon switch: pistol + SMG from the start, 1/2/Q instant');
-  try {
+  await runSection('[4] weapon switch: pistol + SMG from the start, 1/2/Q instant', async () => {
     const weaponsMod = await import(path.join(SRC, 'weapons.js'));
-    const G = makeDriveG();
+    const G = makeG(inputMod, rng);
     worldMod.init(G);
     weaponsMod.init(G);
     const w = G.weapons;
@@ -424,54 +421,46 @@ async function main() {
     check('cycleWeapon goes back to pistol', weaponsMod.cycleWeapon(G) === true && w.current === 'pistol');
     check('cycleWeapon goes to smg again', weaponsMod.cycleWeapon(G) === true && w.current === 'smg');
     // Key path: Digit2 selects SMG, Q cycles, Digit3 (unowned shotgun) is ignored.
+    const pressKey = (code) => {
+      G.input.keys.add(code);
+      weaponsMod.update(G, 1 / 60);
+      G.input.keys.delete(code);
+      weaponsMod.update(G, 1 / 60);
+    };
     weaponsMod.selectWeapon(G, 'pistol');
-    G.input.keys.add('Digit2');
-    weaponsMod.update(G, 1 / 60);
-    G.input.keys.delete('Digit2');
-    weaponsMod.update(G, 1 / 60);
+    pressKey('Digit2');
     check('Digit2 key selects SMG', w.current === 'smg', `current=${w.current}`);
-    G.input.keys.add('KeyQ');
-    weaponsMod.update(G, 1 / 60);
-    G.input.keys.delete('KeyQ');
-    weaponsMod.update(G, 1 / 60);
+    pressKey('KeyQ');
     check('Q cycles to pistol', w.current === 'pistol', `current=${w.current}`);
-    G.input.keys.add('Digit3');
-    weaponsMod.update(G, 1 / 60);
-    G.input.keys.delete('Digit3');
-    weaponsMod.update(G, 1 / 60);
+    pressKey('Digit3');
     check('Digit3 ignored (shotgun not owned)', w.current === 'pistol', `current=${w.current}`);
     const ammoBefore = w.ammo.pistol;
     const shots = weaponsMod.tryFire(G, { x: 1600, y: 1600, angle: 0 });
     check('tryFire fires the pistol and spends ammo',
       Array.isArray(shots) && shots.length === 1 && w.ammo.pistol === ammoBefore - 1,
       `shots=${shots && shots.length} ammo ${ammoBefore} -> ${w.ammo.pistol}`);
-  } catch (e) {
-    check('weapon switch sequence', false, String((e && e.stack) || e));
-  }
+  });
 
-  // ---------------------------------------------------------------- [5]
-  console.log('\n[5] shootout kill sync: combat kill advances the mission');
-  try {
+  await runSection('[5] shootout kill sync: combat kill advances the mission', async () => {
     const combatMod = await import(path.join(SRC, 'combat.js'));
     const weaponsMod = await import(path.join(SRC, 'weapons.js'));
     const missionsMod = await import(path.join(SRC, 'missions.js'));
-    const G = makeDriveG();
-    G.player.x = 1800; G.player.y = 1500;
+    const G = makeG(inputMod, rng);
+    G.player.x = 1800;
+    G.player.y = 1500;
     worldMod.init(G);
     combatMod.init(G);
     weaponsMod.init(G);
     missionsMod.init(G);
-    const spawnClear = (id, idx) => {
+    const spawnsClear = (idx) => {
       missionsMod.init(G);
-      const ok = G.missions.startMission(G, idx);
-      if (!ok) return false;
-      return G.missions.enemies.every((e) =>
-        worldMod.pointInBuilding(G.world, e.x, e.y, 0) === null);
+      if (!G.missions.startMission(G, idx)) return false;
+      return G.missions.enemies.every((e) => worldMod.pointInBuilding(G.world, e.x, e.y, 0) === null);
     };
-    check('m8 enemies spawn on roads (none in buildings)', spawnClear('m8', 7),
+    check('m8 enemies spawn on roads (none in buildings)', spawnsClear(7),
       `enemies=${JSON.stringify(G.missions.enemies.map((e) => [e.x, e.y]))}`);
-    check('m10 enemies spawn on roads (none in buildings)', spawnClear('m10', 9));
-    check('m12 enemies spawn on roads (none in buildings)', spawnClear('m12', 11));
+    check('m10 enemies spawn on roads (none in buildings)', spawnsClear(9));
+    check('m12 enemies spawn on roads (none in buildings)', spawnsClear(11));
     // Back to m8 for the kill-sync sequence.
     missionsMod.init(G);
     G.missions.startMission(G, 7);
@@ -502,41 +491,39 @@ async function main() {
     check('missions damageEnemy sets dead=true as well',
       f0.dead === true && f0.alive === false && G.missions.progress.enemiesLeft === 2,
       `dead=${f0.dead} left=${G.missions.progress.enemiesLeft}`);
-  } catch (e) {
-    check('shootout kill-sync sequence', false, String((e && e.stack) || e));
-  }
+  });
 
-  // ---------------------------------------------------------------- [6]
-  console.log('\n[6] Spray Shop found through real world.places');
-  try {
+  await runSection('[6] Spray Shop found through real world.places', async () => {
     const policeMod = await import(path.join(SRC, 'police.js'));
-    const G = makeDriveG();
+    const G = makeG(inputMod, rng);
     worldMod.init(G);
     vehiclesMod.init(G);
     policeMod.init(G);
     const car = vehiclesMod.createCar(G, 'sedan', 2600, 600, 0);
     car.driver = 'player';
     G.vehicles.list.push(car);
-    G.player.x = 2600; G.player.y = 600;
-    G.player.inCar = true; G.player.driving = true; G.player.onFoot = false;
-    G.player.car = car; G.player.vehicle = car;
+    G.player.x = 2600;
+    G.player.y = 600;
+    G.player.inCar = true;
+    G.player.driving = true;
+    G.player.onFoot = false;
+    G.player.car = car;
+    G.player.vehicle = car;
     G.heat = 58;
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 120; i += 1) {
       policeMod.update(G, 1 / 60);
       G.time.t += 1 / 60;
     }
     check('heat drains at the Spray Shop (2600,600)', G.heat < 20, `heat=${G.heat.toFixed(1)}`);
-  } catch (e) {
-    check('Spray Shop sequence', false, String((e && e.stack) || e));
-  }
+  });
 
-  // ---------------------------------------------------------------- [7]
-  console.log('\n[7] shots.js poses stage and report ready');
-  try {
+  await runSection('[7] shots.js poses stage and report ready', async () => {
     const shotsMod = await import(path.join(SRC, 'shots.js'));
     const missionsMod = await import(path.join(SRC, 'missions.js'));
-    const G = makeDriveG();
-    G.player.x = 1600; G.player.y = 1600;
+    const configMod = await import(path.join(SRC, 'config.js'));
+    const G = makeG(inputMod, rng);
+    G.player.x = 1600;
+    G.player.y = 1600;
     worldMod.init(G);
     missionsMod.init(G);
     shotsMod.init(G);
@@ -556,8 +543,7 @@ async function main() {
       `mission=${G.missions.active && G.missions.active.id} heat=${G.heat}`);
     // Mirror the main loop, which refreshes G.wanted from heat every
     // frame while playing (shots.js reads G.wanted first).
-    const configMod = await import(path.join(SRC, 'config.js'));
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 5; i += 1) {
       G.wanted = configMod.wantedStars(G.heat);
       shotsMod.update(G, 1 / 60);
       shotsMod.draw(G, sharedCtx);
@@ -576,9 +562,7 @@ async function main() {
     check('mission pose reports ready', globalThis.window.__shotReady === true);
     // unknown pose is rejected, never staged
     check('unknown pose is rejected', G.shots.stagePose('nope') === false);
-  } catch (e) {
-    check('shots poses sequence', false, String((e && e.stack) || e));
-  }
+  });
 
   const failed = results.filter((r) => !r.ok);
   console.log(`\nSMOKE B6: ${results.length - failed.length}/${results.length} checks passed`);
