@@ -829,10 +829,20 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
     // instead: reversing while steering turns the nose the same way,
     // so the car backs out of the block while still rotating toward
     // the target, instead of grinding against the wall forever.
-    if (Math.abs(speed) < 25) {
+    // Face mode (parked at an ambush corner) never creeps: the car
+    // must stay on the corner, nose turning, wheels still.
+    if (Math.abs(speed) < 25 && !(opts && opts.face)) {
       if (noseClear(G, p, heading)) keys.hold('KeyW');
       else keys.hold('KeyS');
     }
+    return;
+  }
+  // Face mode: rotate in place toward the aim, never drive. The
+  // rotate branch above handles the turn; once roughly facing, hold
+  // still — the car is parked where the courier is coming.
+  if (opts && opts.face) {
+    keys.release('KeyW');
+    keys.release('KeyS');
     return;
   }
   if (diff > 0.08) { keys.hold('KeyD'); keys.release('KeyA'); }
@@ -1004,103 +1014,47 @@ function driveChase(G, state, courier, courierPos) {
     return true;
   }
 
-  // The ambush is kept until it goes stale — the courier passed it, the
-  // courier's route no longer runs through it, or it is 8 seconds old.
-  // Re-picking every frame (or every 0.75s) while the courier's route
-  // is being rebuilt hands the car a different junction each time and
-  // it spends the chase rotating toward a target that keeps moving.
-  const intercept = state.chaseIntercept;
-  let interceptStale = !intercept;
-  if (intercept) {
-    const dToIntercept = dist(courierPos.x, courierPos.y, intercept.x, intercept.y);
-    const vel = courierVelocity(courier);
-    const closing = (intercept.x - courierPos.x) * vel.x + (intercept.y - courierPos.y) * vel.y;
-    const onRoute = Array.isArray(courier.route) && courier.route.some((wp) => {
-      const point = posOf(wp);
-      return point && dist(point.x, point.y, intercept.x, intercept.y) < 80;
-    });
-    if (dToIntercept < 120 && closing <= 0) interceptStale = true; // courier passed it
-    else if (!onRoute && dToIntercept > 500) interceptStale = true; // route moved on
-    else if (now - state.chaseInterceptAt > 8) interceptStale = true;
-  }
-  if (interceptStale && now - state.chaseInterceptAt > 0.75) {
-    state.chaseIntercept = pickIntercept(G, state, courier, courierPos, p, playerTop);
-    state.chaseInterceptAt = now;
-  }
-  const ambush = state.chaseIntercept;
+  // Corner ambush, driven by the m1-proven road driver. The courier's
+  // destination corner is a FIXED point for a whole leg (15-20s): the
+  // player drives to it on a stable route — driveToward brakes to a
+  // stop before sharp turns and rotates in place, the driving m1
+  // relies on — parks there, and lunges when the courier arrives.
+  // The intercept math kept handing the car a different junction
+  // every 0.75s, and the custom throttle cap never actually held
+  // speed through a turn (it braked to the cap, then re-accelerated);
+  // the probe watched the car arrive at (200,1000) at 420 u/s and
+  // slide off the map edge at x=16.
+  const corner = (typeof courier.destX === 'number' && typeof courier.destY === 'number')
+    ? { x: courier.destX, y: courier.destY }
+    : (nearestRouteJunction(courier, p) || predictPosition(courier, courierPos, p, playerTop));
+  const dCorner = dist(p.x, p.y, corner.x, corner.y);
 
-  // Close in: steer straight at where the courier will be, foot flat —
-  // but only when already roughly facing it. Aiming at a predicted
-  // point behind the car from a standstill just spins the rotate
-  // branch while the courier drives past; the road route turns the car
-  // around first, and direct mode takes over once the nose is right.
+  // Lunge: parked at the corner, or the courier close and roughly
+  // ahead — steer straight at where it will be, foot flat. The
+  // courier slows to ~170 for the corner turn, so a parked car that
+  // lunges as it arrives meets it head-on.
   const aimClose = predictPosition(courier, courierPos, p, playerTop);
   const diffClose = angleDiff(Math.atan2(aimClose.y - p.y, aimClose.x - p.x), heading);
-  const atAmbush = ambush && dist(p.x, p.y, ambush.x, ambush.y) < 130;
-  if ((dCourier < 200 && Math.abs(diffClose) < 1.2)
-    || (atAmbush && dCourier < 420 && Math.abs(diffClose) < 1.2)) {
+  if ((dCorner < 90 && dCourier < 500)
+    || (dCourier < 200 && Math.abs(diffClose) < 1.2)) {
     steerAndThrottle(G, state, aimClose, playerTop, speed, heading, { direct: true });
     return true;
   }
 
-  // Otherwise drive the road route to the ambush. With no ambush,
-  // drive to the nearest junction on the courier's own route instead
-  // of tailing its raw position: the courier cuts corners through
-  // blocks (it has no collision), so its exact position is often
-  // off-road mid-turn, while every point still on its route lies
-  // ahead of it on the asphalt — joining the route is what makes the
-  // next ambush reachable. Only when the courier has no route at all
-  // fall back to its predicted position. The route is cached: it is
-  // rebuilt only when the aim point moved a long way or the cache is
-  // old, never because the courier inched forward.
-  const aimPoint = ambush
-    || nearestRouteJunction(courier, p)
-    || predictPosition(courier, courierPos, p, playerTop);
-  const moved = !state.chaseRouteDest
-    || dist(aimPoint.x, aimPoint.y, state.chaseRouteDest.x, state.chaseRouteDest.y) > 300;
-  if (moved || state.chaseRoute.length === 0 || now - state.chaseRouteAt > 4) {
-    state.chaseRoute = computeRoute(G, p, aimPoint);
-    state.chaseRouteDest = { x: aimPoint.x, y: aimPoint.y };
-    state.chaseRouteAt = now;
+  // Parked at the corner with the courier still far off: face its
+  // approach so the lunge starts with the nose already right. Rotate
+  // in place, never drive — driving now would leave the corner.
+  if (dCorner < 90 && dCourier >= 500) {
+    steerAndThrottle(G, state, aimClose, playerTop, speed, heading, { face: true });
+    return true;
   }
-  // Drop waypoints already passed, and — the old trap — a first
-  // waypoint that sits BEHIND the car. The road router returns the
-  // nearest junction first, and mid-leg that junction is often the one
-  // just left; aiming at it makes the car turn around and rotate in
-  // place while the courier laps the map. But only skip it when the
-  // NEXT waypoint lies ahead along the road the car is already on:
-  // skipping blindly also drops the junction the car must pass through
-  // to get onto the grid (the probe watched the car cut diagonally
-  // across a block toward the second waypoint instead, and grind
-  // along a building face at 36 u/s). When the next waypoint is not
-  // ahead either, keep the first one and turn toward it properly.
-  while (state.chaseRoute.length > 1) {
-    const wp = state.chaseRoute[0];
-    const next = state.chaseRoute[1];
-    const wpDist = dist(p.x, p.y, wp.x, wp.y);
-    const wpAngle = Math.atan2(wp.y - p.y, wp.x - p.x);
-    const nextAngle = Math.atan2(next.y - p.y, next.x - p.x);
-    // Reach the junction before turning: the old 55-unit acceptance
-    // radius let the car swing toward the next waypoint while still
-    // 55 short of the junction — outside the 64-wide road, across a
-    // block corner into buildings. At 30 the car is inside the
-    // junction (road half-width 32) when the turn starts.
-    if (wpDist < 30
-      || (Math.abs(angleDiff(wpAngle, heading)) > 2.0
-        && Math.abs(angleDiff(nextAngle, heading)) < 1.2)) state.chaseRoute.shift();
-    else break;
-  }
-  while (state.chaseRoute.length > 0) {
-    const wp = state.chaseRoute[0];
-    if (dist(p.x, p.y, wp.x, wp.y) < 30) state.chaseRoute.shift();
-    else break;
-  }
-  const waypoint = state.chaseRoute[0] || aimPoint;
-  steerAndThrottle(G, state, waypoint, playerTop, speed, heading, {
-    route: state.chaseRoute,
-    waypointDist: dist(p.x, p.y, waypoint.x, waypoint.y),
-  });
-  return true;
+
+  // Otherwise drive the road to the corner with the m1 driver. Its
+  // route state (state.route / state.routeTarget) is the same one m1
+  // uses, so the route to a fixed corner is as stable as m1's drive
+  // downtown — and when the courier picks a new corner the route
+  // rebuilds exactly once for the new leg.
+  return driveToward(G, state, corner, playerTop);
 }
 
 // Walk toward a point on foot, following the road graph to the nearest

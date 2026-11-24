@@ -104,7 +104,9 @@ async function readChase(page) {
     }
     const ap = G.autopilot || {};
     if (ap.chaseIntercept) out.ambush = `${Math.round(ap.chaseIntercept.x)},${Math.round(ap.chaseIntercept.y)}`;
-    if (Array.isArray(ap.chaseRoute)) out.chaseRouteLen = ap.chaseRoute.length;
+    else if (ap.routeTarget) out.ambush = `corner ${Math.round(ap.routeTarget.x)},${Math.round(ap.routeTarget.y)}`;
+    if (Array.isArray(ap.route)) out.chaseRouteLen = ap.route.length;
+    else if (Array.isArray(ap.chaseRoute)) out.chaseRouteLen = ap.chaseRoute.length;
     return out;
   });
 }
