@@ -8,13 +8,38 @@
 // Run locally with:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { cpSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+
+// Validate the game folder before copying: count files and bytes so a
+// half-written game/ (or an accidental huge asset) is caught here, with
+// a plain log line, instead of failing later inside the dossier builder.
+function gameStats(dir) {
+  let files = 0, bytes = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const sub = gameStats(p);
+      files += sub.files; bytes += sub.bytes;
+    } else {
+      files += 1; bytes += statSync(p).size;
+    }
+  }
+  return { files, bytes };
+}
+const stats = gameStats(join(here, 'game'));
+console.log(`game/: ${stats.files} files, ${stats.bytes} bytes`);
+if (stats.files > 993) {
+  console.warn(`WARNING: game/ has ${stats.files} files, above the 993-file scorer cap`);
+}
+if (stats.bytes > 50331648) {
+  console.warn(`WARNING: game/ is ${stats.bytes} bytes, above the 48 MiB scorer cap`);
+}
 
 mkdirSync(out, { recursive: true });
 cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });

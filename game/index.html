@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crescent Bay</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0e1a;
+    font-family: "Segoe UI", system-ui, sans-serif; color: #f2f2f2; }
+  #game-canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+  .overlay { position: fixed; inset: 0; display: flex; align-items: center;
+    justify-content: center; background: rgba(5, 8, 18, 0.72); z-index: 10; }
+  .overlay[hidden] { display: none; }
+  .panel { background: rgba(12, 16, 32, 0.92); border: 1px solid #3a4a7a;
+    border-radius: 12px; padding: 28px 34px; max-width: 560px; width: 92%;
+    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6); text-align: center; }
+  .panel h1 { font-size: 44px; letter-spacing: 4px; color: #ffd166;
+    text-transform: uppercase; margin-bottom: 6px; }
+  .panel h2 { font-size: 30px; letter-spacing: 3px; color: #ff5d5d;
+    text-transform: uppercase; margin-bottom: 10px; }
+  .panel p { font-size: 15px; line-height: 1.55; color: #cfd6ea; margin-bottom: 12px; }
+  .panel .sub { color: #8fa3d9; font-size: 13px; letter-spacing: 2px;
+    text-transform: uppercase; margin-bottom: 18px; }
+  .btn { display: inline-block; margin: 6px 4px 0; padding: 12px 26px; font-size: 16px;
+    font-weight: 700; letter-spacing: 1px; color: #0b0e1a; background: #ffd166;
+    border: none; border-radius: 8px; cursor: pointer; text-transform: uppercase; }
+  .btn:hover { background: #ffe08a; }
+  .btn.secondary { background: #2c3a66; color: #e8ecff; }
+  .btn.secondary:hover { background: #3a4a7a; }
+  #controls-list { text-align: left; margin: 14px auto 4px; max-width: 420px;
+    font-size: 14px; line-height: 1.7; color: #cfd6ea; }
+  #controls-list b { color: #ffd166; }
+  #mission-dialog .panel { max-width: 480px; }
+  #mission-dialog h2 { color: #ffd166; font-size: 24px; }
+  #mission-dialog .fixer { color: #8fa3d9; font-size: 13px; letter-spacing: 2px;
+    text-transform: uppercase; margin-bottom: 8px; }
+  #game-over-screen .panel h2.caught { color: #6db3ff; }
+  #game-over-screen .panel h2.down { color: #ff5d5d; }
+  .slots { display: flex; gap: 8px; justify-content: center; margin: 12px 0 4px; }
+  .slot-btn { flex: 1; padding: 10px 6px; font-size: 13px; background: #1a2340;
+    color: #cfd6ea; border: 1px solid #3a4a7a; border-radius: 8px; cursor: pointer; }
+  .slot-btn:hover { border-color: #ffd166; color: #ffd166; }
+</style>
+</head>
+<body>
+<canvas id="game-canvas" width="1280" height="720"></canvas>
+
+<div id="title-screen" class="overlay">
+  <div class="panel">
+    <h1>Crescent Bay</h1>
+    <div class="sub">An open-city story &middot; Rook &middot; Mara &amp; Dex</div>
+    <p>Twelve jobs. One city. Drive, run, and stay ahead of the law —
+       from the first pickup downtown to the plane waiting at the airport.</p>
+    <div class="slots" id="save-slots">
+      <button class="slot-btn" data-slot="0">Slot 1<br>Empty</button>
+      <button class="slot-btn" data-slot="1">Slot 2<br>Empty</button>
+      <button class="slot-btn" data-slot="2">Slot 3<br>Empty</button>
+    </div>
+    <button class="btn" id="new-game-btn">New Game</button>
+    <button class="btn secondary" id="continue-btn">Continue</button>
+    <div id="controls-list">
+      <b>WASD / Arrows</b> — move &amp; drive &nbsp; <b>Mouse</b> — aim, <b>Click</b> — shoot<br>
+      <b>Shift</b> — sprint &nbsp; <b>E</b> — enter / exit car, accept job<br>
+      <b>R</b> — radio station &nbsp; <b>Q</b> / <b>1 2 3</b> — switch weapon<br>
+      <b>Esc / P</b> — pause &nbsp; <b>M</b> — mute
+    </div>
+  </div>
+</div>
+
+<div id="pause-menu" class="overlay" hidden>
+  <div class="panel">
+    <h2>Paused</h2>
+    <p>Take a breath, Rook. The city waits.</p>
+    <button class="btn" id="resume-btn">Resume</button>
+    <button class="btn secondary" id="save-btn">Save Game</button>
+    <button class="btn secondary" id="quit-btn">Quit to Title</button>
+  </div>
+</div>
+
+<div id="mission-dialog" class="overlay" hidden>
+  <div class="panel">
+    <div class="fixer" id="mission-fixer">Mara</div>
+    <h2 id="mission-title">First Job</h2>
+    <p id="mission-text">Pick up the package at the market and deliver it downtown.</p>
+    <button class="btn" id="accept-btn">Accept (E)</button>
+    <button class="btn secondary" id="decline-btn">Not Now</button>
+  </div>
+</div>
+
+<div id="game-over-screen" class="overlay" hidden>
+  <div class="panel">
+    <h2 id="game-over-title" class="down">DOWN</h2>
+    <p id="game-over-text">Rook went down in Crescent Bay.</p>
+    <button class="btn" id="retry-btn">Retry Mission</button>
+    <button class="btn secondary" id="gameover-title-btn">Title Screen</button>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
