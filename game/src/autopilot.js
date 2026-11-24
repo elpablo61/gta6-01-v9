@@ -823,15 +823,22 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
   const faceOnly = !!(opts && opts.face);
   const direct = !!(opts && opts.direct);
 
-  // Facing the wrong way at speed: brake in a straight line first.
-  // Steering while braking at 300+ arcs the car off the road into a
-  // block. No steering while the speed is high; once slow, the
-  // rotate-in-place branch below takes over.
+  // Facing the wrong way at speed: slow down in a straight line
+  // first. Steering while braking at 300+ arcs the car off the road
+  // into a block. No steering while the speed is high; once slow,
+  // the rotate-in-place branch below takes over.
+  // BRAKING IS DRAG-ONLY on this car: player.js overwrites car.brake
+  // (the 520 brake stat) with a boolean every frame, so
+  // effectiveBrake() returns 0/1 and the S key at speed does NOT
+  // slow the car at all — it coasts (probe #1: v=420 held for 2s
+  // under brake-cap, v=69 constant for 4s under brake-straight).
+  // The only decel is the 260/s^2 drag with NO keys held, so a
+  // slow-down releases everything instead of holding S.
   if (Math.abs(diff) > 1.5 && Math.abs(speed) > 60) {
     keys.release('KeyA');
     keys.release('KeyD');
     keys.release('KeyW');
-    keys.hold('KeyS');
+    keys.release('KeyS');
     state.dbgDrive = 'brake-straight';
     return;
   }
@@ -892,8 +899,14 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
     else if (turn > 0.9 && wpDist < 350) cap = Math.min(cap, 180);
   }
   if (mag > cap) {
+    // Drag-brake: release everything (see the brake-straight guard
+    // above — holding S coasts instead of slowing this car). Drag
+    // is 260/s^2, so 420 -> 180 needs ~280 units and the caps above
+    // engage 350-400 out; the feedback loop coasts above the cap
+    // and throttles below it, so the car arrives at the turn near
+    // the cap instead of sailing past it at 420.
     keys.release('KeyW');
-    keys.hold('KeyS');
+    keys.release('KeyS');
     state.dbgDrive = 'brake-cap';
   } else {
     keys.hold('KeyW');
@@ -1684,11 +1697,12 @@ export function update(G, dt) {
     // Stop the car sliding through the dialog: the m1 drive holds W
     // when the mission completes, and the old branch never released
     // it — the car coasted ~500 units off-road during the m2 dialog
-    // while the player was still "talking". Release every key, and
-    // hold the brake while driving, so m2 starts on the road,
-    // stationary, nose where m1 left it.
+    // while the player was still "talking". Release every key so the
+    // car drag-brakes to a stop. Do NOT hold S here: on this car S
+    // at speed is a coast (no decel — see steerAndThrottle) and at
+    // low speed it reverses, so it would roll the car backwards
+    // through the dialog instead of stopping it.
     keys.releaseAll();
-    if (driving) keys.hold('KeyS');
     if (now - state.lastDialogAt > 0.3) {
       state.lastDialogAt = now;
       if (typeof document !== 'undefined') {
