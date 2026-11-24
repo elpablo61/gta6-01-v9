@@ -356,12 +356,16 @@ function driveManual(car, G, dt) {
     }
   }
   // Stuck detection (the same rule the road-following driver uses):
-  // trying to move fast but barely displaced means wedged — back
-  // straight out. Without this, a car grinding a building wall under
-  // throttle stays there forever: the probe watched one sit at 7 u/s
-  // for 40+ seconds at the m2 start.
+  // throttle held but barely displaced means wedged — back straight
+  // out. The check keys on the throttle, not on speed: grinding a wall
+  // scrubs speed to ~7 u/s (each wall hit multiplies it by 0.6), so a
+  // speed threshold never fires — the probe watched a car sit at
+  // 2-11 u/s for 30+ seconds pushing into a building face.
+  // Without this, a car grinding a building wall under throttle stays
+  // there forever.
   const moved = Math.hypot(car.x - prevX, car.y - prevY);
-  if (Math.abs(car.speed) > 40 && moved < Math.abs(wantStep) * 0.25) {
+  const trying = Math.abs(car.throttle || 0) > 0;
+  if (trying && moved < Math.abs(wantStep) * 0.25) {
     car.stuckTimer = (car.stuckTimer || 0) + step;
     if (car.stuckTimer > 1.5) {
       car.stuckTimer = 0;
