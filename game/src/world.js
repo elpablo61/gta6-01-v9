@@ -159,6 +159,16 @@ export function buildWorld(rng) {
     // Marina pier juts east into the water.
     pier: { x: 3000, y: 2140, w: 180, h: 120 },
   };
+  // Routing helpers live on the world object itself: the autopilot (and
+  // any other module) looks them up as world.findRoute /
+  // world.nearestRoadPoint, and without them it silently falls back to
+  // straight lines straight across building blocks (the spec requires
+  // road-graph routes with the first junction as first waypoint).
+  world.findRoute = (sx, sy, tx, ty) => findRoute(world, sx, sy, tx, ty);
+  world.nearestRoadPoint = (x, y) => nearestRoadPoint(world, x, y);
+  world.nearestJunction = (x, y) => nearestJunction(world, x, y);
+  world.pointInBuilding = (x, y, pad) => pointInBuilding(world, x, y, pad);
+  world.isOnRoad = (x, y) => isOnRoad(world, x, y);
   return world;
 }
 
