@@ -27,6 +27,9 @@ const PLACE = {
   hideout: { x: 600, y: 2600 },
   docks: { x: 2600, y: 2200 },
   bank: { x: 1800, y: 1000 },
+  // The garage pin matches world.places.garage exactly: the Fixer
+  // Garage is at (1000,2200), and an m11 objective anywhere else sends
+  // the player to the wrong building.
   garage: { x: 1000, y: 2200 },
 };
 
@@ -142,11 +145,14 @@ function getHeat(G) {
   if (G && G.police && typeof G.police.heat === 'number') return G.police.heat;
   return 0;
 }
+// Set the game clock. Two fields carry the hour because two readers
+// use different names — render and traffic read .hours, other code
+// reads .hour — so both are written together, plus the derived night
+// flag. Writing only one leaves the other stale and night never
+// renders (the hour reader defaults to noon).
 function setHour(G, h) {
   if (!G) return;
   if (!G.time || typeof G.time !== 'object') G.time = {};
-  // Render + traffic read .hours; other code reads .hour — keep both in
-  // sync or night never renders (hoursOf defaults to 12 = permanent noon).
   G.time.hour = h;
   G.time.hours = h;
   G.time.night = h < 6 || h >= 19;
@@ -212,6 +218,9 @@ function expose(G) {
   G.missions = {
     list: MISSION_DEFS,
     get index() { return S.index; },
+    // Writable on purpose: the playtest and the retry path set the
+    // mission directly. Out-of-range writes are ignored rather than
+    // throwing, so a bad index can never corrupt the arc.
     set index(v) { if (typeof v === 'number' && v >= 0 && v < MISSION_DEFS.length) S.index = v; },
     get active() { return S.active; },
     get stage() { return S.stage; },
@@ -383,6 +392,9 @@ function setupStage(G, stage) {
       break;
     case 'm8':
       if (stage === 0) {
+        // Shootout enemies spawn ON a road line (x=1800 or y=1400),
+        // never inside a building block: the autopilot walks to them
+        // on foot and a block-interior spawn can never be reached.
         spawnEnemies([
           { x: 1700, y: 1300 }, { x: 1900, y: 1400 }, { x: 1800, y: 1600 },
         ]);
@@ -399,6 +411,9 @@ function setupStage(G, stage) {
       break;
     case 'm10':
       if (stage === 0) {
+        // Same on-road rule as m8: every arena enemy stands on a road
+        // line (x=2600/2700 or y=2100/2200/2300), so the walking
+        // autopilot can always close to firing range.
         spawnEnemies([
           { x: 2600, y: 2100 }, { x: 2700, y: 2200 }, { x: 2600, y: 2300 },
           { x: 2400, y: 2300 }, { x: 2700, y: 1800 },
@@ -429,6 +444,9 @@ function setupStage(G, stage) {
       if (stage === 0) {
         setHeat(G, Math.max(getHeat(G), 74));
         requestHeli(G, true);
+        // On-road spawns again (x=1800 / y=1000 lines): the bank
+        // shootout is fought on foot, so no enemy may start inside
+        // a block the autopilot cannot walk into.
         spawnEnemies([
           { x: 1800, y: 900 }, { x: 1900, y: 1000 }, { x: 1700, y: 1100 }, { x: 1800, y: 1100 },
         ]);
@@ -455,10 +473,12 @@ function pickCourierDest(G) {
   if (!c) return;
   const P = getPlayerPos(G);
   // Pick a far junction away from the player as the courier's target.
-  // Never the corner the courier is already standing on: when the
-  // player sits far from that corner it stays the "farthest" pick, the
-  // courier's route becomes a single waypoint it accepts instantly,
-  // and it parks at the corner forever instead of running its route.
+  // One exclusion matters: never the corner the courier is already
+  // standing on. When the player sits far from that corner it stays
+  // the "farthest" pick, the route collapses to a single waypoint the
+  // courier accepts instantly, and it parks at the corner forever
+  // instead of running its route — so corners within 800 of the
+  // courier are not candidates at all.
   const far = [
     { x: 3000, y: 3000 }, { x: 200, y: 3000 }, { x: 3000, y: 200 }, { x: 200, y: 200 },
     { x: 2600, y: 600 }, { x: 600, y: 2600 },
@@ -475,6 +495,31 @@ function pickCourierDest(G) {
   c.route = findRoute(c.x, c.y, best.x, best.y);
 }
 
+// Speed cap for the courier ahead of a turn: the courier follows the
+// same rule as every other car in the city and slows before a sharp
+// junction turn. At a flat 380 it turns on a ~170-unit radius, cuts
+// the corner through the block, and never gives the player a closing
+// window; easing to 250 (sharp) / 170 (hairpin) ahead of the turn
+// keeps it on the road and opens a window at every junction, without
+// touching its 380 cruise on the straights or the 55% cut per ram hit.
+// `diff` is the turn to the current waypoint, `wp`/`next` the current
+// and following waypoints, `d` the distance to the current one, `want`
+// the heading toward it.
+function courierTurnCap(c, diff, wp, next, d, want) {
+  let cap = c.cruise;
+  const absDiff = Math.abs(diff);
+  if (absDiff > 1.5) cap = Math.min(cap, 170);
+  else if (absDiff > 0.9) cap = Math.min(cap, 250);
+  if (next) {
+    const outAngle = Math.atan2(next.y - wp.y, next.x - wp.x);
+    let turnAhead = outAngle - want;
+    while (turnAhead > Math.PI) turnAhead -= Math.PI * 2;
+    while (turnAhead < -Math.PI) turnAhead += Math.PI * 2;
+    if (Math.abs(turnAhead) > 0.9 && d < 320) cap = Math.min(cap, 260);
+  }
+  return cap;
+}
+
 function updateCourier(G, dt) {
   const c = S.courier;
   if (!c) return;
@@ -488,12 +533,12 @@ function updateCourier(G, dt) {
   if (wp) {
     const d = dist(c.x, c.y, wp.x, wp.y);
     // Accept the waypoint once inside a radius that grows with speed,
-    // or once the courier has driven past it at close range: the
-    // past-plane test must ALSO be close (d < 150) — a waypoint 400
+    // or once the courier has driven past it at close range. The
+    // past-plane test also needs closeness (d < 150): a waypoint 400
     // units away on the next leg sits behind the courier's nose while
     // it is still turning toward it, and accepting it there burns the
-    // whole route without moving (the courier parked at a corner for
-    // 100+ seconds in the probe while its route cycled 1..14).
+    // whole route without moving — the courier once parked at a corner
+    // for 100+ seconds while its route cycled 1..14.
     const ahead = (wp.x - c.x) * Math.cos(c.angle) + (wp.y - c.y) * Math.sin(c.angle);
     if (d < Math.max(40, c.speed * 0.15) || (ahead < -20 && d < 150)) {
       c.route.shift();
@@ -502,25 +547,7 @@ function updateCourier(G, dt) {
       let diff = want - c.angle;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
-      // The courier follows the same rule as every other car in the
-      // city: slow down before a sharp junction turn. At a flat 380
-      // it turns on a ~170-unit radius, cuts the corner through the
-      // block, and never gives the player a closing window; easing to
-      // 250 (sharp) / 170 (hairpin) ahead of the turn keeps it on the
-      // road and opens a window at every junction, without touching
-      // its 380 cruise on the straights or the 55% cut per ram hit.
-      let cap = c.cruise;
-      const absDiff = Math.abs(diff);
-      if (absDiff > 1.5) cap = Math.min(cap, 170);
-      else if (absDiff > 0.9) cap = Math.min(cap, 250);
-      const next = c.route[1];
-      if (next) {
-        const outAngle = Math.atan2(next.y - wp.y, next.x - wp.x);
-        let turnAhead = outAngle - want;
-        while (turnAhead > Math.PI) turnAhead -= Math.PI * 2;
-        while (turnAhead < -Math.PI) turnAhead += Math.PI * 2;
-        if (Math.abs(turnAhead) > 0.9 && d < 320) cap = Math.min(cap, 260);
-      }
+      const cap = courierTurnCap(c, diff, wp, c.route[1], d, want);
       c.angle += clamp(diff, -2.2 * dt, 2.2 * dt);
       c.speed += (cap - c.speed) * Math.min(1, dt * 1.2);
       if (c.speed < 0) c.speed = 0;
@@ -557,7 +584,10 @@ function damageEnemy(enemy, dmg) {
   if (enemy.hp <= 0) {
     enemy.hp = 0;
     enemy.alive = false;
-    enemy.dead = true; // combat.js reads .dead; keep both flags in sync
+    // Two flags mean the same death: combat.js resolves kills through
+    // .dead, while this module counts the living through .alive. Set
+    // both here, or a combat kill never advances a shootout stage.
+    enemy.dead = true;
     S.progress.enemiesLeft = S.enemies.filter((e) => e.alive).length;
   }
   return true;
