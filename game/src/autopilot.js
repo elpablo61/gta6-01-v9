@@ -560,8 +560,6 @@ export function init(G) {
     chaseRoute: [],
     chaseRouteDest: null,
     chaseRouteAt: 0,
-    chaseRouteFrom: null,
-    chaseRoutePrev: null,
     chaseIntercept: null,
     chaseInterceptAt: 0,
     chaseStartAt: 0,
@@ -757,8 +755,6 @@ function chaseReset(state) {
     chaseRoute: [],
     chaseRouteDest: null,
     chaseRouteAt: 0,
-    chaseRouteFrom: null,
-    chaseRoutePrev: null,
     chaseIntercept: null,
     chaseInterceptAt: 0,
     chaseStartAt: 0,
@@ -843,7 +839,15 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
     return;
   }
 
-  if (Math.abs(diff) > 1.2 && Math.abs(speed) < 50) {
+  // Rotate in place only when nearly stopped: at speed the radius
+  // steering turns the car, and every full stop hands the courier
+  // another straight. The threshold is 70, not 50: the brake-straight
+  // guard above fires over 60, so a 50 threshold left a 50-60 dead
+  // zone where neither fired and the car throttled while steering
+  // hard — probe #2 t=226 arced off the road that way (v=53,
+  // diff ~180 deg). In the overlap the guard wins (it runs first)
+  // and drag-slows the car into the rotate.
+  if (Math.abs(diff) > 1.2 && Math.abs(speed) < 70) {
     keys.release('KeyW');
     keys.release('KeyS');
     steerToward(keys, diff);
@@ -1093,10 +1097,10 @@ function pickIntercept(G, state, courier, courierPos, p, playerTop) {
 // while moving instead of braking to a standstill at every junction.
 //
 // Waypoints drop only when proven passed: within the 42-unit radius,
-// or past the waypoint along its leg (on the leg line, heading
-// roughly along it, and still near it) — never merely because the
-// car is close to the NEXT waypoint, which is what used to cut the
-// diagonal across a building block.
+// or past the waypoint along its OUTGOING leg (on the next segment's
+// line, heading roughly along it, and still near it) — never merely
+// because the car is close to the NEXT waypoint, which is what used
+// to cut the diagonal across a building block.
 function driveChaseFast(G, state, target) {
   const p = playerPos(G);
   const vehicle = playerVehicle(G);
@@ -1113,25 +1117,35 @@ function driveChaseFast(G, state, target) {
     state.chaseRoute = computeRoute(G, p, target);
     state.chaseRouteDest = { x: target.x, y: target.y };
     state.chaseRouteAt = state.now;
-    state.chaseRouteFrom = { x: p.x, y: p.y };
-    state.chaseRoutePrev = { x: p.x, y: p.y };
   }
   const route = state.chaseRoute;
 
-  // Drop waypoints proven passed.
+  // Drop waypoints proven passed. A waypoint drops when the car is
+  // on top of it, or when the car has rounded it onto the OUTGOING
+  // leg — past it along the next segment, near that line, heading
+  // along it. The outgoing leg is the test, never the incoming
+  // one: the router's first waypoint is the nearest junction, which
+  // is often the junction the car just left, i.e. BEHIND it, and an
+  // incoming-leg test can never pass on a fresh route (the leg runs
+  // from the car to the waypoint, so "past it" is impossible).
+  // Probe #2 watched that failure at t=226: the car U-turned toward
+  // a behind-it waypoint instead of driving on. The outgoing test
+  // also never drops a waypoint the car overshot straight past:
+  // the car sits beside the outgoing line, not on it, so it keeps
+  // aiming at the junction it missed instead of cutting the
+  // diagonal across the block to the next one.
   while (route.length > 0) {
     const wp = route[0];
     if (dist(p.x, p.y, wp.x, wp.y) < WAYPOINT_RADIUS) {
-      state.chaseRoutePrev = { x: wp.x, y: wp.y };
       route.shift();
       continue;
     }
-    const prev = state.chaseRoutePrev || state.chaseRouteFrom || p;
-    const legDx = wp.x - prev.x;
-    const legDy = wp.y - prev.y;
+    if (route.length < 2) break;
+    const next = route[1];
+    const legDx = next.x - wp.x;
+    const legDy = next.y - wp.y;
     const legLen = Math.hypot(legDx, legDy);
     if (legLen < 1) {
-      state.chaseRoutePrev = { x: wp.x, y: wp.y };
       route.shift();
       continue;
     }
@@ -1146,7 +1160,6 @@ function driveChaseFast(G, state, target) {
       && Math.abs(angleDiff(heading, legAngle)) < 1.0
       && dist(p.x, p.y, wp.x, wp.y) < 250;
     if (!passed) break;
-    state.chaseRoutePrev = { x: wp.x, y: wp.y };
     route.shift();
   }
 
