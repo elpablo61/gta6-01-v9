@@ -1,0 +1,1 @@
+{"description":"Crescent Bay — a 2D top-down open-world crime game for the make.fun gta6-01 bounty","devDependencies":{"playwright":"1.49.0"},"engines":{"node":">=22"},"license":"MIT","name":"gta6-01-v9","private":true,"scripts":{"build":"node main.ts","playtest":"node tools/playtest.mjs","serve":"node serve.ts"},"type":"module","version":"9.0.0"}
