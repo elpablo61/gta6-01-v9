@@ -144,10 +144,12 @@ function getHeat(G) {
 }
 function setHour(G, h) {
   if (!G) return;
-  if (G.time && typeof G.time === 'object' && typeof G.time.hour === 'number') { G.time.hour = h; return; }
-  if (typeof G.time === 'number') { G.time = h; return; }
-  if (G.time && typeof G.time === 'object') { G.time.hour = h; return; }
-  G.time = { hour: h };
+  if (!G.time || typeof G.time !== 'object') G.time = {};
+  // Render + traffic read .hours; other code reads .hour — keep both in
+  // sync or night never renders (hoursOf defaults to 12 = permanent noon).
+  G.time.hour = h;
+  G.time.hours = h;
+  G.time.night = h < 6 || h >= 19;
 }
 // Did the player press E this frame? Tries every input shape the game
 // exposes, with edge detection for the raw key set.

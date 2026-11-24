@@ -61,7 +61,7 @@ export function createGame() {
     police: [],
     heli: null,
     missions: { index: 0, current: null, stage: 0, timeLeft: 0, completed: [] },
-    time: { hour: 12, minute: 0, day: 1, night: false },
+    time: { hour: 12, hours: 12, minute: 0, day: 1, night: false },
     heat: 0,
     wanted: 0,
     camera: { x: 200, y: 200 },
@@ -262,7 +262,7 @@ export function startNewGame(G) {
   G.cash = 0;
   G.heat = 0;
   G.wanted = 0;
-  G.time = { hour: 12, minute: 0, day: 1, night: false };
+  G.time = { hour: 12, hours: 12, minute: 0, day: 1, night: false };
   G.missions = { index: 0, current: null, stage: 0, timeLeft: 0, completed: [] };
   G.player.health = config.PLAYER_MAX_HEALTH;
   G.player.x = 200; G.player.y = 200;
