@@ -491,13 +491,23 @@ function computeRoute(G, from, to) {
   const world = G.world || {};
   const finder = world.findRoute || world.route || world.findPath || world.bfsRoute || G.findRoute;
   if (typeof finder === 'function') {
-    try {
-      const raw = finder.call(world, from, to) || finder(from, to);
-      if (Array.isArray(raw) && raw.length > 0) {
-        return raw.map((p) => posOf(p)).filter(Boolean);
+    // The world's findRoute takes FOUR NUMBERS (sx, sy, tx, ty). The
+    // old call passed two point OBJECTS, which threw inside the router
+    // (nearestRoadPoint got an object and returned null), so every
+    // route silently fell to the midpoint fallback below: one road
+    // point + the target, i.e. a straight diagonal across a building
+    // block. The car wedged itself inside the block and crawled at
+    // ~5 u/s along the walls (m1 stalled, t=105s at 518,16). Try the
+    // numeric form first, then the object form, then fall back.
+    for (const args of [[from.x, from.y, to.x, to.y], [from, to]]) {
+      try {
+        const raw = finder.call(world, ...args);
+        if (Array.isArray(raw) && raw.length > 0) {
+          return raw.map((p) => posOf(p)).filter(Boolean);
+        }
+      } catch {
+        // Try the next calling shape.
       }
-    } catch {
-      // Fall through to the straight line.
     }
   }
   // Straight line, with the midpoint snapped to the nearest road when the
@@ -580,10 +590,16 @@ function driveToward(G, state, target, cruise) {
 
   // A turn sharper than ~52 degrees: stop fully, rotate in place, then go
   // straight. A moving turning circle is wider than the 64-wide road.
+  // Release the OPPOSITE steer key too: without it, a steer key left
+  // held from walking (or from a previous turn the other way) stays down
+  // alongside the new one, A and D cancel to steer 0, the car never
+  // turns, and it crawls straight into the nearest wall forever (m1
+  // stalled at y=16, angle frozen at -1.45, keys A+D held together).
   if (Math.abs(diff) > 0.9 && speed < 140) {
     keys.release('KeyW');
     keys.release('KeyS');
-    if (diff > 0) keys.hold('KeyD'); else keys.hold('KeyA');
+    if (diff > 0) { keys.hold('KeyD'); keys.release('KeyA'); }
+    else { keys.hold('KeyA'); keys.release('KeyD'); }
     // Crawl forward while rotating so the car keeps a little authority.
     if (speed < 25) keys.hold('KeyW');
     return true;
