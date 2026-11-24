@@ -1003,16 +1003,24 @@ function nearestRoadPointOf(G, p) {
 //                (courier.cruise x 1.15) — the cruise is read live, so
 //                each ram hit (cruise x 0.55) opens more junctions
 //
-// Ambush = the junction nearest the player with playerETA + 1s <
-// courierETA. Fallback when none qualifies: race the nearest junction
-// by playerETA anyway — a race the player might win beats a far
-// corner it cannot. The car parks 90 units BEFORE the junction on
-// the arrival leg, nose toward the incoming courier, for a head-on
-// lunge on a straight road instead of a turn at the junction itself.
+// Ambush = the junction nearest the player that it reaches with a
+// real parking margin (>= 3s before the courier — time to park, face
+// the approach and lunge). Fallback when none qualifies: the junction
+// with the widest (least-bad) margin — a race the player might win
+// beats a far corner it cannot. The car parks 90 units BEFORE the
+// junction on the arrival leg, nose toward the incoming courier, for
+// a head-on lunge on a straight road instead of a turn at the
+// junction itself.
 //
-// The pick is cached 2s and recomputed when the courier's destination,
-// its next route waypoint, or its hit count changes — never because
-// the courier merely moved along its leg.
+// The pick is STICKY: once chosen it is held while the courier is
+// still on the same leg, the junction is still ahead on its route,
+// and the player can still get there first (or is already parked
+// at it) — up to 20s. A pick that changes every time the courier
+// passes a waypoint sends the car after a junction the courier
+// already left; probe #2 watched the car chase the pick down the
+// map instead of waiting at one. The pick only moves when the
+// courier passes it, the leg changes, or the player can no longer
+// make it.
 
 // Road distance along the courier's route from its current position
 // to the route waypoint at index `upto` (inclusive).
@@ -1025,14 +1033,37 @@ function courierRoadDist(courier, courierPos, upto) {
   return road;
 }
 
+// Road distance along the courier's route to a junction on it, or
+// null when the junction is no longer ahead on the route (the
+// courier already passed it).
+function courierRoadDistTo(courier, courierPos, junction) {
+  const route = courier.route;
+  if (!Array.isArray(route) || route.length === 0) return null;
+  for (let i = 0; i < route.length; i += 1) {
+    const point = posOf(route[i]);
+    if (point && dist(point.x, point.y, junction.x, junction.y) < 60) {
+      return courierRoadDist(courier, courierPos, i);
+    }
+  }
+  return null;
+}
+
 function pickIntercept(G, state, courier, courierPos, p, playerTop) {
   const route = Array.isArray(courier.route) ? courier.route : [];
-  const destKey = `${courier.destX || 0},${courier.destY || 0}`
-    + `#${courier.hits || 0}`
-    + `#${route.length > 0 ? `${route[0].x},${route[0].y}` : 'none'}`;
-  if (state.chaseIntercept && state.chaseIntercept.key === destKey
-    && (state.now - (state.chaseInterceptAt || 0)) < 2) {
-    return state.chaseIntercept;
+  const destKey = `${courier.destX || 0},${courier.destY || 0}#${courier.hits || 0}`;
+  const cruise = (typeof courier.cruise === 'number' && courier.cruise > 0) ? courier.cruise : 380;
+  const courierSpeed = cruise * 1.15;
+  // Sticky hold: same leg, junction still ahead, player can still
+  // get there first — or is already parked at it.
+  const held = state.chaseIntercept;
+  if (held && held.junction && held.key === destKey
+    && (state.now - (state.chaseInterceptAt || 0)) < 20) {
+    const road = courierRoadDistTo(courier, courierPos, held.junction);
+    if (road !== null) {
+      const playerEta = (1.3 * dist(p.x, p.y, held.junction.x, held.junction.y)) / 300;
+      const nearPark = held.park && dist(p.x, p.y, held.park.x, held.park.y) < 120;
+      if (nearPark || playerEta + 0.5 < road / courierSpeed) return held;
+    }
   }
   // No route (between legs): aim at where the courier will be.
   if (route.length === 0) {
@@ -1042,28 +1073,27 @@ function pickIntercept(G, state, courier, courierPos, p, playerTop) {
     state.chaseInterceptAt = state.now;
     return picked;
   }
-  const cruise = (typeof courier.cruise === 'number' && courier.cruise > 0) ? courier.cruise : 380;
-  const courierSpeed = cruise * 1.15;
-  let best = null; // nearest winnable junction, by player ETA
+  let best = null; // nearest junction with a >= 3s parking margin
   let bestPlayerEta = Infinity;
-  let nearest = null; // fallback: nearest junction by player ETA
-  let nearestPlayerEta = Infinity;
+  let widest = null; // fallback: widest (least-bad) margin
+  let widestMargin = -Infinity;
   for (let i = 0; i < route.length; i += 1) {
     const junction = posOf(route[i]);
     if (!junction) continue;
     const playerEta = (1.3 * dist(p.x, p.y, junction.x, junction.y)) / 300;
-    if (playerEta < nearestPlayerEta) {
-      nearestPlayerEta = playerEta;
-      nearest = { junction, playerEta, index: i };
-    }
     const road = courierRoadDist(courier, courierPos, i);
     const courierEta = road / courierSpeed;
-    if (playerEta + 1 < courierEta && playerEta < bestPlayerEta) {
+    const margin = courierEta - playerEta;
+    if (margin > widestMargin) {
+      widestMargin = margin;
+      widest = { junction, playerEta, courierEta, index: i };
+    }
+    if (margin >= 3 && playerEta < bestPlayerEta) {
       bestPlayerEta = playerEta;
       best = { junction, playerEta, courierEta, index: i };
     }
   }
-  const chosen = best || nearest;
+  const chosen = best || widest;
   if (!chosen) return null;
   const junction = chosen.junction;
   // Park 90 units before the junction on the arrival leg. The leg
