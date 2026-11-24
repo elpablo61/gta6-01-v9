@@ -950,6 +950,54 @@ function nearestRouteJunction(courier, playerPos) {
   return best ? { x: best.x, y: best.y } : null;
 }
 
+// Is the straight segment from A to B drivable, or does it cut through
+// a building block? Sample the segment every ~50 units and ask the world
+// whether each sample sits inside a building. A chase that steers
+// straight at the courier across a block ends pressed against a wall —
+// the two passing probes and the failed arc all showed the same thing:
+// the car leaves the road at full speed, slides along the world edge,
+// and never gets back. Direct pursuit is only safe when the line is open.
+function segmentBlocked(G, from, to) {
+  const world = G.world || {};
+  if (typeof world.pointInBuilding !== 'function') return false;
+  const steps = Math.max(1, Math.ceil(dist(from.x, from.y, to.x, to.y) / 50));
+  for (let i = 1; i < steps; i += 1) {
+    const t = i / steps;
+    const x = from.x + (to.x - from.x) * t;
+    const y = from.y + (to.y - from.y) * t;
+    try {
+      if (world.pointInBuilding(x, y, 20)) return true;
+    } catch { return false; }
+  }
+  return false;
+}
+
+// Brake in a straight line: no steering, no throttle, brake key only.
+// Steering while braking at speed arcs the car off the road into a
+// block; the turn comes after the car is slow, from the rotate-in-place
+// branch. Returns true (the autopilot drove this frame).
+function brakeStraight(G, state) {
+  const keys = state.keys;
+  keys.release('KeyA');
+  keys.release('KeyD');
+  keys.release('KeyW');
+  keys.hold('KeyS');
+  return true;
+}
+
+// The nearest on-road point to the player, or null when the world
+// cannot answer. The road point is always legal asphalt, never outside
+// the world edge.
+function nearestRoadPointOf(G, p) {
+  const world = G.world || {};
+  const nearest = world.nearestRoadPoint || world.nearestRoad || world.snapToRoad;
+  if (typeof nearest !== 'function') return null;
+  try {
+    const raw = nearest.call(world, p.x, p.y);
+    return posOf(raw) || (Array.isArray(raw) ? { x: raw[0], y: raw[1] } : null);
+  } catch { return null; }
+}
+
 function driveChase(G, state, courier, courierPos) {
   const p = playerPos(G);
   const vehicle = playerVehicle(G);
@@ -959,14 +1007,23 @@ function driveChase(G, state, courier, courierPos) {
   const now = state.now;
   const dCourier = dist(p.x, p.y, courierPos.x, courierPos.y);
 
-  // Off-road recovery first: the m1 exit often leaves the car inside a
-  // block, and every bit of chase logic below assumes road driving.
-  // Skip it when the courier is point-blank — a ram in progress
-  // outranks getting back on the asphalt. Keep a breadcrumb trail of
-  // on-road points (one every half second, eight deep) so the recovery
-  // aims at the exit the car actually used, not the nearest road point
-  // behind a building.
-  if (dCourier > 250) {
+  // Off-road recovery first, and it is NOT optional any more. The
+  // failed arc run proved why: the car left the road at 420, slid
+  // along the west wall and then the south wall for 600 seconds, and
+  // the old gate (skip recovery while the courier is within 250) kept
+  // it there — the courier drives one road over, about 180 units away
+  // across a building row, so the gate never opened and the direct
+  // branches kept aiming at a target no road can reach. A ram cannot
+  // happen through a building, so recovery only yields when the
+  // courier is inside genuine ram range (<90). Keep a breadcrumb trail
+  // of on-road points (one every half second, eight deep): the exit
+  // the car actually used is open by construction, so it wins while
+  // it is fresh (within 400); further back than that, or with no
+  // trail at all, the nearest road point is the target. Drive there
+  // with the m1 road driver at cruise 120 — slow enough that its
+  // stop-and-rotate branch can engage — instead of reversing blindly
+  // along a wall, which only grinds the car further down the edge.
+  {
     const world = G.world || {};
     if (typeof world.isOnRoad === 'function') {
       let onRoad = true;
@@ -978,12 +1035,36 @@ function driveChase(G, state, courier, courierPos) {
           state.roadTrail.push({ x: p.x, y: p.y, t: now });
           if (state.roadTrail.length > 8) state.roadTrail.shift();
         }
-      } else {
+      } else if (dCourier > 90) {
         const trail = state.roadTrail || [];
         const exit = trail.length > 0 ? trail[trail.length - 1] : null;
-        const target = exit && dist(p.x, p.y, exit.x, exit.y) > 40 ? exit : null;
-        if (recoverToRoad(G, state, p, heading, target)) return true;
+        let target = null;
+        if (exit && dist(p.x, p.y, exit.x, exit.y) > 40 && dist(p.x, p.y, exit.x, exit.y) <= 400) {
+          target = exit;
+        } else {
+          target = nearestRoadPointOf(G, p);
+        }
+        if (target) return driveToward(G, state, target, 120);
       }
+    }
+  }
+
+  // Alignment gate: never enter a sharp turn at speed. The arc run's
+  // car held 420 through a ~180-degree reversal at the (200,1000)
+  // junction and arced straight off the road into the west wall strip.
+  // Whatever branch runs below, if the car is fast and its nose is
+  // more than ~57 degrees off the direction to the next road waypoint,
+  // brake in a straight line first and let the rotate-in-place branch
+  // take over once slow. The waypoint comes from the cached road route
+  // when there is one; otherwise the corner itself is the aim.
+  if (speed > 120) {
+    const nextWp = (Array.isArray(state.route) && state.route.length > 0)
+      ? state.route[0]
+      : null;
+    const aimPoint = nextWp || { x: courierPos.x, y: courierPos.y };
+    const aimAngle = Math.atan2(aimPoint.y - p.y, aimPoint.x - p.x);
+    if (Math.abs(angleDiff(aimAngle, heading)) > 1.0) {
+      return brakeStraight(G, state);
     }
   }
 
@@ -996,8 +1077,13 @@ function driveChase(G, state, courier, courierPos) {
   // 160 u/s and 500 away, came east through the player's position).
   if (now - state.chaseStartAt < 5 && dCourier < 700) {
     const aimOpen = predictPosition(courier, courierPos, p, playerTop);
-    steerAndThrottle(G, state, aimOpen, playerTop, speed, heading, { direct: true });
-    return true;
+    // Sprint only down an open line: a straight charge across a block
+    // corner is what put the car into the west wall in the arc run.
+    // When the line is blocked, fall through to the road-route ambush.
+    if (!segmentBlocked(G, p, aimOpen)) {
+      steerAndThrottle(G, state, aimOpen, playerTop, speed, heading, { direct: true });
+      return true;
+    }
   }
 
   // A courier slowed by two or more hits crawls (under ~150 u/s): no
@@ -1010,8 +1096,12 @@ function driveChase(G, state, courier, courierPos) {
   // courier at long range the road route still catches it easily.
   if (speedOf(courier) < 150 && dCourier < 400) {
     const aimSlow = predictPosition(courier, courierPos, p, playerTop);
-    steerAndThrottle(G, state, aimSlow, playerTop, speed, heading, { direct: true });
-    return true;
+    // Same open-line rule as the sprint: a crawling courier one road
+    // over is not worth a charge through a building row.
+    if (!segmentBlocked(G, p, aimSlow)) {
+      steerAndThrottle(G, state, aimSlow, playerTop, speed, heading, { direct: true });
+      return true;
+    }
   }
 
   // Corner ambush, driven by the m1-proven road driver. The courier's
@@ -1035,8 +1125,9 @@ function driveChase(G, state, courier, courierPos) {
   // lunges as it arrives meets it head-on.
   const aimClose = predictPosition(courier, courierPos, p, playerTop);
   const diffClose = angleDiff(Math.atan2(aimClose.y - p.y, aimClose.x - p.x), heading);
-  if ((dCorner < 90 && dCourier < 500)
-    || (dCourier < 200 && Math.abs(diffClose) < 1.2)) {
+  if (((dCorner < 90 && dCourier < 500)
+    || (dCourier < 200 && Math.abs(diffClose) < 1.2))
+    && !segmentBlocked(G, p, aimClose)) {
     steerAndThrottle(G, state, aimClose, playerTop, speed, heading, { direct: true });
     return true;
   }
