@@ -3,3 +3,6 @@ out/
 dist/
 .DS_Store
 *.log
+# Contact sheet is a human readability check only — buildDossier refuses
+# more than 4 images, so it must never be committed into screenshots/.
+screenshots/contact-sheet*.jpg
