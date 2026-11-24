@@ -345,7 +345,7 @@ function setupStage(G, stage) {
       // Courier spawns on the road ahead of the player, driving away.
       const start = nearestRoadPoint(P.x + 500, P.y);
       S.courier = {
-        x: start.x, y: start.y, angle: 0, speed: 0, cruise: 380,
+        x: start.x, y: start.y, angle: 0, speed: 0, cruise: 300, // B13: 380 gave the player only ~40/s closing on straights, so a missed opening straight meant the courier never slowed (probe: 1 hit in 163s); 300 closes at ~120/s and the first ram lands before the first corner
         route: [], routeDest: null, destX: 0, destY: 0, hits: 0, hitCd: 0,
       };
       pickCourierDest(G);
@@ -497,11 +497,11 @@ function pickCourierDest(G) {
 
 // Speed cap for the courier ahead of a turn: the courier follows the
 // same rule as every other car in the city and slows before a sharp
-// junction turn. At a flat 380 it turns on a ~170-unit radius, cuts
+// junction turn. At a flat 300 it turns on a ~170-unit radius, cuts
 // the corner through the block, and never gives the player a closing
 // window; easing to 250 (sharp) / 170 (hairpin) ahead of the turn
 // keeps it on the road and opens a window at every junction, without
-// touching its 380 cruise on the straights or the 55% cut per ram hit.
+// touching its 300 cruise on the straights or the 55% cut per ram hit.
 // `diff` is the turn to the current waypoint, `wp`/`next` the current
 // and following waypoints, `d` the distance to the current one, `want`
 // the heading toward it.
@@ -560,10 +560,13 @@ function updateCourier(G, dt) {
     }
   }
   if (c.route.length === 0) pickCourierDest(G);
-  // Ram detection: player car within 70 while speed > 120.
+  // Ram detection: player car within 100 while speed > 120. (B13: radius
+  // was 70 — the probe's t=53 near-miss at dist=79, speed 420, scored
+  // no hit, and a 70 window is narrower than one car length of
+  // lateral error at an intercept.)
   const car = getPlayerCar(G);
   const P = getPlayerPos(G);
-  if (car && c.hitCd <= 0 && getPlayerSpeed(G) > 120 && dist(P.x, P.y, c.x, c.y) < 70) {
+  if (car && c.hitCd <= 0 && getPlayerSpeed(G) > 120 && dist(P.x, P.y, c.x, c.y) < 100) {
     c.hits += 1;
     S.progress.hits = c.hits;
     c.cruise *= 0.55; // each hit cuts the courier's cruise to 55%
