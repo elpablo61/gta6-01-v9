@@ -1,10 +1,16 @@
-// Chase probe (B7): watches the m2 Tail Chase live and reports numbers.
-// Plays m1 on autopilot first (~60s), then samples the chase once per
-// second: player speed / car type, courier speed / cruise / hits, distance,
-// autopilot mode, and the closest approach. Prints a summary at the end so
-// a fix can be judged on numbers, not on vibes.
+// Chase probe for Crescent Bay (gta6-01-v9) — the m2 Tail Chase, sampled
+// once a second until the mission completes or the time budget runs out.
 //
-// Usage: node tools/probe-chase.mjs [--seconds 320] [--port 8933]
+// Written for the v11/v12 chase: the arc run slid along the west/south
+// world walls for 600+s while the probe passed, so this probe records
+// the numbers that distinguish the two runs — courier distance, whether
+// the player is on a road, car heading, and the autopilot's route
+// target — every second, so a wall-slide shows up as a pattern, not a
+// guess. Summary counters at the end: closest approach, seconds spent
+// off-road (and off-road while the courier is close), hit times, and
+// how many times the mission restarted after a timeout.
+//
+// Usage: node tools/probe-chase.mjs [--seconds 300] [--port 8933]
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -13,121 +19,113 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, '..');
-const GAME_ROOT = path.join(REPO_ROOT, 'game');
-const LOG = '/tmp/probe-chase.txt';
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(HERE, '..');
+const GAME_DIR = path.join(ROOT, 'game');
+const LOG_PATH = '/tmp/probe-chase.txt';
 
-const HEADLESS_SHELL = path.join(
+const SHELL = path.join(
   os.homedir(), '.cache', 'ms-playwright', 'chromium_headless_shell-1255',
   'chrome-headless-shell-linux64', 'chrome-headless-shell',
 );
-
-const MIME = {
+const CONTENT_TYPE = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
 };
 
-const args = process.argv.slice(2);
-let chaseSeconds = 320;
+const argv = process.argv.slice(2);
+let chaseSecs = 300;
 let port = 8933;
-for (let i = 0; i < args.length; i += 1) {
-  if (args[i] === '--seconds') chaseSeconds = Number(args[++i]);
-  if (args[i] === '--port') port = Number(args[++i]);
+for (let i = 0; i < argv.length; i += 1) {
+  if (argv[i] === '--seconds') chaseSecs = Number(argv[++i]);
+  if (argv[i] === '--port') port = Number(argv[++i]);
 }
 
-function startServer(port) {
+function serve(portNo) {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
       try {
         const url = new URL(req.url, 'http://localhost');
-        let filePath = path.join(REPO_ROOT, decodeURIComponent(url.pathname));
-        if (url.pathname === '/') filePath = path.join(GAME_ROOT, 'index.html');
-        if (!filePath.startsWith(REPO_ROOT)) { res.writeHead(403); res.end(); return; }
-        if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
-          filePath = path.join(filePath, 'index.html');
-        }
-        const data = fs.readFileSync(filePath);
-        res.writeHead(200, { 'content-type': MIME[path.extname(filePath)] || 'application/octet-stream' });
-        res.end(data);
-      } catch {
-        res.writeHead(404);
-        res.end('not found');
-      }
+        let file = path.join(ROOT, decodeURIComponent(url.pathname));
+        if (url.pathname === '/') file = path.join(GAME_DIR, 'index.html');
+        if (!file.startsWith(ROOT)) { res.writeHead(403); res.end(); return; }
+        if (fs.existsSync(file) && fs.statSync(file).isDirectory()) file = path.join(file, 'index.html');
+        res.writeHead(200, { 'content-type': CONTENT_TYPE[path.extname(file)] || 'application/octet-stream' });
+        res.end(fs.readFileSync(file));
+      } catch (e) { res.writeHead(404); res.end('nf'); }
     });
     server.on('error', reject);
-    server.listen(port, '127.0.0.1', () => resolve(server));
+    server.listen(portNo, '127.0.0.1', () => resolve(server));
   });
 }
 
-function log(line) {
-  fs.appendFileSync(LOG, line + '\n');
+function say(line) {
+  fs.appendFileSync(LOG_PATH, line + '\n');
   console.log(line);
 }
 
-async function readChase(page) {
+// One 1-second snapshot of the chase: player + courier + autopilot.
+async function snapshot(page) {
   return page.evaluate(() => {
     const G = window.__game;
     if (!G) return null;
     const p = G.player || {};
-    const car = p.car || p.vehicle || null;
+    const car = p.car || null;
     const m = G.missions || {};
     const c = m.courier || null;
+    const ap = G.autopilot || {};
+    const world = G.world || {};
     const out = {
       mission: (m.active && m.active.id) || null,
-      stage: m.stage ?? null,
-      status: m.status ?? null,
-      completed: Array.isArray(m.completed) ? m.completed.slice() : [],
-      hits: (m.progress && m.progress.hits) || (c && c.hits) || 0,
-      px: p.x ?? null, py: p.y ?? null,
+      timeLeft: typeof m.timeLeft === 'number' ? Math.round(m.timeLeft) : null,
+      done: Array.isArray(m.completed) ? m.completed.slice() : [],
+      hits: (m.progress && m.progress.hits) || 0,
+      px: Math.round(p.x || 0),
+      py: Math.round(p.y || 0),
+      angle: car ? +((car.angle || 0)).toFixed(2) : null,
+      speed: Math.round(Math.abs((car && car.speed) || p.speed || 0)),
       inCar: !!p.inCar,
-      carType: car ? (car.type || '?') : null,
-      carTop: car ? (car.topSpeed ?? null) : null,
-      carSpeed: car ? Math.round(Math.abs(car.speed || 0)) : Math.round(Math.abs(p.speed || 0)),
-      mode: (G.autopilot && G.autopilot.mode) || null,
-      heat: typeof G.heat === 'number' ? Math.round(G.heat) : null,
+      carTop: car ? (car.topSpeed || null) : null,
+      mode: ap.mode || null,
+      routeTarget: ap.routeTarget ? `${Math.round(ap.routeTarget.x)},${Math.round(ap.routeTarget.y)}` : null,
+      routeLen: Array.isArray(ap.route) ? ap.route.length : null,
+      onRoad: (typeof world.isOnRoad === 'function') ? !!world.isOnRoad(p.x, p.y) : null,
     };
     if (c) {
-      out.cx = Math.round(c.x); out.cy = Math.round(c.y);
+      out.cx = Math.round(c.x);
+      out.cy = Math.round(c.y);
+      out.cAngle = +(c.angle || 0).toFixed(2);
       out.cSpeed = Math.round(c.speed || 0);
       out.cCruise = Math.round(c.cruise || 0);
-      out.cAngle = +(c.angle || 0).toFixed(2);
-      out.cRouteLen = Array.isArray(c.route) ? c.route.length : null;
       out.cDest = (typeof c.destX === 'number') ? `${Math.round(c.destX)},${Math.round(c.destY)}` : null;
-      if (typeof out.px === 'number') {
-        out.dist = Math.round(Math.hypot(out.px - c.x, out.py - c.y));
-      }
+      out.cRouteLen = Array.isArray(c.route) ? c.route.length : null;
+      out.dist = Math.round(Math.hypot((p.x || 0) - c.x, (p.y || 0) - c.y));
     }
-    const ap = G.autopilot || {};
-    if (ap.chaseIntercept) out.ambush = `${Math.round(ap.chaseIntercept.x)},${Math.round(ap.chaseIntercept.y)}`;
-    else if (ap.routeTarget) out.ambush = `corner ${Math.round(ap.routeTarget.x)},${Math.round(ap.routeTarget.y)}`;
-    if (Array.isArray(ap.route)) out.chaseRouteLen = ap.route.length;
-    else if (Array.isArray(ap.chaseRoute)) out.chaseRouteLen = ap.chaseRoute.length;
     return out;
   });
 }
 
 async function main() {
-  fs.writeFileSync(LOG, `=== probe-chase ${new Date().toISOString()} ===\n`);
-  const server = await startServer(port);
+  fs.writeFileSync(LOG_PATH, `=== probe-chase ${new Date().toISOString()} ===\n`);
+  const server = await serve(port);
   const browser = await chromium.launch({
     headless: true,
-    executablePath: HEADLESS_SHELL,
+    executablePath: SHELL,
     args: ['--no-sandbox', '--disable-gpu', '--use-gl=swiftshader', '--enable-unsafe-swiftshader'],
   });
   const errors = [];
+  let outcome = 'TIMEOUT';
   let minDist = Infinity;
-  let samplesIn70 = 0;
-  let samplesTotal = 0;
+  let samples = 0;
+  let in70 = 0;
+  let slowSamples = 0;
   let speedSum = 0;
-  let speedSamples = 0;
   let maxSpeed = 0;
-  let slowSamples = 0; // player speed < 60 while driving during chase
-  let result = 'TIMEOUT';
+  let offRoadSecs = 0;
+  let closeOffRoadSecs = 0; // off-road while the courier is within 250
+  let lastHits = 0;
+  let restarts = 0;
   try {
     const page = await (await browser.newContext({ viewport: { width: 1280, height: 720 } })).newPage();
     page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
@@ -141,50 +139,49 @@ async function main() {
       window.__autopilot = true;
     });
 
-    // Phase 1: wait for m2 to become active (m1 plays first, ~60s).
+    // Wait for m1 to finish and m2 to become active (up to 240s).
     const t0 = Date.now();
-    let m2At = null;
+    let chaseAt = null;
     while (Date.now() - t0 < 240000) {
-      const s = await readChase(page).catch(() => null);
-      if (s && s.mission === 'm2') { m2At = Date.now(); break; }
-      if (s && s.completed && s.completed.includes('m2')) { result = 'ALREADY-DONE'; break; }
+      const s = await snapshot(page).catch(() => null);
+      if (s && s.mission === 'm2') { chaseAt = Date.now(); break; }
+      if (s && s.done.includes('m2')) { outcome = 'ALREADY-DONE'; break; }
       await page.waitForTimeout(1000);
     }
-    if (!m2At && result !== 'ALREADY-DONE') {
-      log('m2 never became active within 240s');
-      result = 'NO-M2';
-    } else if (result !== 'ALREADY-DONE') {
-      log(`m2 active after ${Math.round((m2At - t0) / 1000)}s (m1 done first)`);
-      // Phase 2: sample the chase.
+    if (!chaseAt && outcome !== 'ALREADY-DONE') {
+      say('m2 never became active within 240s');
+      outcome = 'NO-M2';
+    } else if (outcome !== 'ALREADY-DONE') {
+      say(`m2 active after ${Math.round((chaseAt - t0) / 1000)}s`);
       const chaseStart = Date.now();
-      let lastHits = 0;
-      while (Date.now() - chaseStart < chaseSeconds * 1000) {
-        const s = await readChase(page).catch(() => null);
+      while (Date.now() - chaseStart < chaseSecs * 1000) {
+        const s = await snapshot(page).catch(() => null);
         if (!s) { await page.waitForTimeout(1000); continue; }
-        if (s.completed.includes('m2')) { result = 'M2-COMPLETE'; break; }
-        if (s.mission !== 'm2') {
-          log(`mission left m2 (now ${s.mission}, status ${s.status}) — chase ended`);
-          result = 'LEFT-M2';
-          break;
-        }
-        samplesTotal += 1;
-        if (typeof s.dist === 'number') {
-          if (s.dist < minDist) minDist = s.dist;
-          if (s.dist < 70) samplesIn70 += 1;
-        }
-        if (typeof s.carSpeed === 'number') {
-          speedSum += s.carSpeed;
-          speedSamples += 1;
-          if (s.carSpeed > maxSpeed) maxSpeed = s.carSpeed;
-          if (s.inCar && s.carSpeed < 60) slowSamples += 1;
-        }
+        if (s.done.includes('m2')) { outcome = 'M2-COMPLETE'; break; }
+        if (s.mission !== 'm2') { say(`left m2 (now ${s.mission})`); outcome = 'LEFT-M2'; break; }
+        const t = Math.round((Date.now() - chaseStart) / 1000);
         if (s.hits !== lastHits) {
-          log(`  HIT ${s.hits}/4 at t=${Math.round((Date.now() - chaseStart) / 1000)}s dist=${s.dist} speed=${s.carSpeed} courier=${s.cSpeed}/${s.cCruise}`);
+          if (s.hits < lastHits) {
+            restarts += 1;
+            say(`  RESTART? hits ${lastHits} -> ${s.hits} at t=${t}s (m2 timed out and restarted)`);
+          } else {
+            say(`  HIT ${s.hits}/4 at t=${t}s dist=${s.dist} speed=${s.speed} courier=${s.cSpeed}/${s.cCruise}`);
+          }
           lastHits = s.hits;
         }
-        if (samplesTotal % 10 === 0 || samplesTotal <= 3) {
-          log(`t=${Math.round((Date.now() - chaseStart) / 1000)}s mode=${s.mode} p=(${s.px},${s.py}) car=${s.carType}/${s.carTop} speed=${s.carSpeed} courier=(${s.cx},${s.cy}) ${s.cSpeed}/${s.cCruise} routeLen=${s.cRouteLen} dest=${s.cDest} ambush=${s.ambush || '-'} chaseRoute=${s.chaseRouteLen ?? '-'} dist=${s.dist} hits=${s.hits}`);
+        samples += 1;
+        if (typeof s.dist === 'number') {
+          if (s.dist < minDist) minDist = s.dist;
+          if (s.dist < 70) in70 += 1;
         }
+        speedSum += s.speed || 0;
+        if ((s.speed || 0) > maxSpeed) maxSpeed = s.speed;
+        if (s.inCar && (s.speed || 0) < 60) slowSamples += 1;
+        if (s.onRoad === false) {
+          offRoadSecs += 1;
+          if (typeof s.dist === 'number' && s.dist <= 250) closeOffRoadSecs += 1;
+        }
+        say(`t=${t}s hits=${s.hits} tl=${s.timeLeft} p=(${s.px},${s.py}) a=${s.angle} v=${s.speed} onRoad=${s.onRoad} courier=(${s.cx},${s.cy}) a=${s.cAngle} ${s.cSpeed}/${s.cCruise} dest=${s.cDest} route=${s.cRouteLen} dist=${s.dist} mode=${s.mode} rt=${s.routeTarget || '-'} rlen=${s.routeLen ?? '-'}`);
         await page.waitForTimeout(1000);
       }
     }
@@ -192,11 +189,10 @@ async function main() {
     await browser.close().catch(() => {});
     server.close();
   }
-  const avgSpeed = speedSamples ? Math.round(speedSum / speedSamples) : null;
-  log(`\n== PROBE RESULT: ${result} ==`);
-  log(`samples=${samplesTotal} minDist=${minDist === Infinity ? 'n/a' : minDist} in70=${samplesIn70} avgPlayerSpeed=${avgSpeed} maxSpeed=${maxSpeed} slowSamples(<60,driving)=${slowSamples}/${speedSamples} consoleErrors=${errors.length}`);
-  if (errors.length) for (const e of errors.slice(0, 5)) log(`  err: ${e}`);
-  return result === 'M2-COMPLETE' ? 0 : 1;
+  say(`\n== CHASE RESULT: ${outcome} ==`);
+  say(`samples=${samples} minDist=${minDist === Infinity ? 'n/a' : minDist} in70=${in70} avgPlayerSpeed=${samples ? Math.round(speedSum / samples) : 'n/a'} maxSpeed=${maxSpeed} slowSamples=${slowSamples} offRoadSecs=${offRoadSecs} offRoadWhileCourierWithin250=${closeOffRoadSecs} restartsSeen=${restarts} consoleErrors=${errors.length}`);
+  if (errors.length) for (const e of errors.slice(0, 5)) say(`  err: ${e}`);
+  return outcome === 'M2-COMPLETE' ? 0 : 1;
 }
 
 process.exitCode = await main();
