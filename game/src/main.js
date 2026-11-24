@@ -168,14 +168,29 @@ function refreshSlots(G) {
   slots.forEach((btn, i) => {
     let label = `Slot ${i + 1}<br>Empty`;
     try {
-      const mod = moduleByName(G, 'save');
-      if (mod && typeof mod.describeSlot === 'function') {
-        label = mod.describeSlot(G, i) || label;
+      // Read through the save API object on G.save (readSlot): it uses
+      // the real versioned key and reports corrupt slots. The old path
+      // called a describeSlot that does not exist, then read the wrong
+      // localStorage key ('crescent-bay-save-i' vs the real
+      // 'crescent-bay-save-v1-slot-i'), so a real save always showed Empty.
+      if (G.save && typeof G.save.readSlot === 'function') {
+        const slot = G.save.readSlot(i);
+        if (slot.status === 'ok') {
+          const date = slot.date ? new Date(slot.date).toLocaleDateString() : '';
+          label = `Slot ${i + 1}<br>$${slot.cash ?? 0} · M${(slot.mission ?? 0) + 1}${date ? ' · ' + date : ''}`;
+        } else if (slot.status === 'corrupt') {
+          label = `Slot ${i + 1}<br>Corrupt`;
+        }
       } else {
-        const raw = localStorage.getItem(`crescent-bay-save-${i}`);
-        if (raw) {
-          const data = JSON.parse(raw);
-          label = `Slot ${i + 1}<br>$${data.cash ?? 0} · M${(data.missionIndex ?? 0) + 1}`;
+        const mod = moduleByName(G, 'save');
+        if (mod && typeof mod.describeSlot === 'function') {
+          label = mod.describeSlot(G, i) || label;
+        } else {
+          const raw = localStorage.getItem(`crescent-bay-save-${i}`);
+          if (raw) {
+            const data = JSON.parse(raw);
+            label = `Slot ${i + 1}<br>$${data.cash ?? 0} · M${(data.missionIndex ?? 0) + 1}`;
+          }
         }
       }
     } catch { label = `Slot ${i + 1}<br>Corrupt`; }
@@ -186,46 +201,91 @@ function refreshSlots(G) {
 function wireOverlays(G) {
   const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
   on('new-game-btn', () => {
-    G.save.slot = 0;
+    // Keep the slot the player picked on the title screen: startNewGame
+    // re-inits every module (save.init replaces G.save), so the choice
+    // must be read before and restored after.
+    const slot = (G.save && typeof G.save.slot === 'number') ? G.save.slot : 0;
     startNewGame(G);
+    G.save.slot = slot;
+    if (typeof G.save.activeSlot === 'number') G.save.activeSlot = slot;
   });
   on('continue-btn', () => {
-    const mod = moduleByName(G, 'save');
+    // Load through the save API object on G.save (loadSlot), not the
+    // module namespace: save.js only exports init/update/draw, so
+    // mod.load never existed and Continue silently started a new game.
+    const slot = (G.save && typeof G.save.slot === 'number')
+      ? G.save.slot
+      : (G.save && typeof G.save.activeSlot === 'number' ? G.save.activeSlot : 0);
     let loaded = false;
     try {
-      if (mod && typeof mod.load === 'function') loaded = !!mod.load(G, G.save.slot);
+      if (G.save && typeof G.save.loadSlot === 'function') loaded = !!G.save.loadSlot(slot);
+      else {
+        const mod = moduleByName(G, 'save');
+        if (mod && typeof mod.load === 'function') loaded = !!mod.load(G, slot);
+      }
     } catch (err) { console.error('[main] load failed:', err); }
     if (!loaded) startNewGame(G);
     else { hideAllOverlays(); G.state = 'playing'; }
   });
   on('resume-btn', () => { hideAllOverlays(); G.state = 'playing'; });
   on('save-btn', () => {
+    // Manual save through the save API object on G.save (saveSlot):
+    // the module namespace has no saveGame export, so the old call
+    // was a silent no-op and the pause-menu Save button did nothing.
     try {
-      const mod = moduleByName(G, 'save');
-      if (mod && typeof mod.saveGame === 'function') mod.saveGame(G, G.save.slot);
+      const slot = (G.save && typeof G.save.slot === 'number')
+        ? G.save.slot
+        : (G.save && typeof G.save.activeSlot === 'number' ? G.save.activeSlot : 0);
+      if (G.save && typeof G.save.saveSlot === 'function') G.save.saveSlot(slot);
+      else if (G.save && typeof G.save.saveActive === 'function') G.save.saveActive();
+      else {
+        const mod = moduleByName(G, 'save');
+        if (mod && typeof mod.saveGame === 'function') mod.saveGame(G, slot);
+      }
     } catch (err) { console.error('[main] save failed:', err); }
   });
   on('quit-btn', () => { G.state = 'title'; hideAllOverlays(); show('title-screen'); refreshSlots(G); });
   on('accept-btn', () => {
     // The dialog object itself has no accept method; the mission module
     // owns acceptance (it starts the offered mission from its own state).
-    const missions = moduleByName(G, 'missions');
+    // missions.js only exports init/update/draw — acceptDialog lives on
+    // the exposed missions API object (G.missions), NOT on the module
+    // namespace, so calling it via moduleByName was a silent no-op and
+    // syncMissionDialog re-opened the dialog on the very next frame:
+    // the dialog could never be accepted, by click or by E.
+    const api = G.missions;
     try {
-      if (missions && typeof missions.acceptDialog === 'function') missions.acceptDialog(G);
+      if (api && typeof api.acceptDialog === 'function') api.acceptDialog(G);
+      else {
+        const missions = moduleByName(G, 'missions');
+        if (missions && typeof missions.acceptDialog === 'function') missions.acceptDialog(G);
+      }
     } catch (err) { console.error('[main] accept failed:', err); }
     hide('mission-dialog');
     if (G.state === 'dialog') G.state = 'playing';
   });
   on('decline-btn', () => { hide('mission-dialog'); if (G.state === 'dialog') G.state = 'playing'; });
   on('retry-btn', () => {
-    const missions = moduleByName(G, 'missions');
-    if (missions && typeof missions.restartMission === 'function') missions.restartMission(G);
+    // Restart the failed mission from stage 0 through the exposed
+    // missions API (startMission); the module namespace has no
+    // restartMission export, so the old call was a silent no-op.
+    // (failMission already reset the stage on death; this re-inits the
+    // mission cleanly so Retry works even if that reset was skipped.)
+    try {
+      const api = G.missions;
+      if (api && typeof api.startMission === 'function' && typeof api.index === 'number') {
+        api.startMission(G, api.index);
+      }
+    } catch (err) { console.error('[main] retry failed:', err); }
     hideAllOverlays(); G.state = 'playing';
   });
   on('gameover-title-btn', () => { G.state = 'title'; hideAllOverlays(); show('title-screen'); refreshSlots(G); });
   document.querySelectorAll('#save-slots .slot-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       G.save.slot = Number(btn.dataset.slot || 0);
+      // Keep the save API's active slot in step so Continue and manual
+      // save write/read the slot the player actually picked.
+      if (G.save && typeof G.save.activeSlot === 'number') G.save.activeSlot = G.save.slot;
       document.querySelectorAll('#save-slots .slot-btn').forEach((b) => {
         b.style.borderColor = b === btn ? '#ffd166' : '';
       });

@@ -79,9 +79,21 @@ function speedOf(G) {
   return 0;
 }
 
+const WEAPON_DISPLAY_NAMES = { pistol: 'Pistol', smg: 'SMG', shotgun: 'Shotgun' };
+
 function weaponInfo(G) {
   const w = G.weapons || {};
   const cur = w.current || w.active || null;
+  // The live shape: current is a STRING id ('pistol' / 'smg' /
+  // 'shotgun') and ammo lives in the w.ammo map. The old code read
+  // cur.name / cur.ammo off the string, so the HUD always showed
+  // 'Pistol • 0' no matter which weapon was actually selected.
+  if (typeof cur === 'string') {
+    const ammoMap = w.ammo || {};
+    const name = WEAPON_DISPLAY_NAMES[cur]
+      || (cur.charAt(0).toUpperCase() + cur.slice(1));
+    return { name, ammo: num(ammoMap[cur], 0), mag: 0 };
+  }
   if (cur) {
     return {
       name: cur.name || cur.id || 'Pistol',
@@ -99,8 +111,22 @@ function weaponInfo(G) {
 
 function radioInfo(G) {
   const r = G.radio || {};
+  // The live shape: station is a NUMBER index and the name comes from
+  // the stationName() function. The old code String()'d the index, so
+  // the HUD showed '1' / '2' instead of the station name (station 0
+  // only looked right because it fell through to the 'Bay FM' default).
+  if (typeof r.stationName === 'function') {
+    try {
+      const n = r.stationName();
+      if (n) return { name: n, on: r.on !== false };
+    } catch { /* fall through */ }
+  }
+  if (Array.isArray(r.stations) && typeof r.station === 'number') {
+    const st = r.stations[r.station];
+    if (st) return { name: st.name || st.title || String(st), on: r.on !== false };
+  }
   const st = r.station || r.current || null;
-  if (st) {
+  if (st && typeof st === 'object') {
     return {
       name: st.name || st.title || String(st),
       on: r.on !== false,

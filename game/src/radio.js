@@ -47,6 +47,12 @@ function semitoneToFreq(root, semis) {
 function justPressed(G, code) {
   const inp = G && G.input;
   if (!inp) return false;
+  // The input module exposes pressed() as a FUNCTION over the
+  // edge-triggered _pressed set — this is the shape the live game
+  // actually has. The old code only checked inp.pressed.has (a Set
+  // shape that never exists) and inp.rPressed (never set), so R could
+  // never cycle the station in the browser.
+  if (typeof inp.pressed === 'function') { try { return !!inp.pressed(code); } catch (e) { return false; } }
   if (typeof inp.justPressed === 'function') { try { return !!inp.justPressed(code); } catch (e) { return false; } }
   if (inp.pressed && typeof inp.pressed.has === 'function') return inp.pressed.has(code);
   if (inp.pressedKeys && typeof inp.pressedKeys.has === 'function') return inp.pressedKeys.has(code);

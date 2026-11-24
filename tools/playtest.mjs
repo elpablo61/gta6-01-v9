@@ -203,6 +203,45 @@ async function startGame(page) {
   return 'key-enter';
 }
 
+// New Game offers the first mission in a dialog that blocks play; click
+// Accept (the real user path) when it is open so later checks run in play.
+// The offer appears on a ~1.2s timer after New Game, so WAIT for it
+// (up to 4s) instead of checking once — a too-early check leaves the
+// dialog open and every later key-driven check (weapons, radio) runs in
+// dialog state, where the game loop does not call module updates at all.
+async function acceptDialogIfOpen(page) {
+  try {
+    const dlg = page.locator('#mission-dialog');
+    try {
+      await dlg.waitFor({ state: 'visible', timeout: 4000 });
+    } catch {
+      return; // no dialog offered (e.g. mid-arc) — nothing to accept
+    }
+    await page.locator('#accept-btn').click({ timeout: 2000 });
+    await dlg.waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(300);
+  } catch { /* dialog already gone */ }
+}
+
+// Read the live weapon state through the game's own debug hook.
+async function readWeapons(page) {
+  return page.evaluate(() => {
+    const w = window.__game?.weapons;
+    if (!w) return null;
+    return { current: w.current, owned: { ...w.owned }, ammo: { ...w.ammo } };
+  });
+}
+
+// Hold a key long enough (~200ms, many frames) that the game's
+// edge-triggered key readers see it; a bare Playwright press can fall
+// between two frames and be missed entirely.
+async function holdKey(page, code, ms = 200) {
+  await page.keyboard.down(code);
+  await page.waitForTimeout(ms);
+  await page.keyboard.up(code);
+  await page.waitForTimeout(250);
+}
+
 async function enableAutopilot(page) {
   // The game may read ?autopilot=1, a window flag, or an exported enable.
   await page.evaluate(() => {
@@ -225,14 +264,24 @@ async function runCold(page, baseUrl, errors) {
   results.push(check('page loads (canvas present)', await page.locator('#game-canvas').count() > 0));
   const titleVisible = await page.locator('#title-screen').isVisible().catch(() => false);
   results.push(check('title screen visible', titleVisible));
+  // Gate: the title screen lists 3 save slots.
+  const slotCount = await page.locator('#save-slots .slot-btn').count().catch(() => 0);
+  const slotTexts = await page.locator('#save-slots .slot-btn').allTextContents().catch(() => []);
+  results.push(check('title shows 3 save slots', slotCount === 3, slotTexts.map((t) => t.replace(/\s+/g, ' ').trim()).join(' | ')));
   const framesBefore = await page.evaluate(() => window.__frames || 0);
   await page.waitForTimeout(1000);
   const framesAfter = await page.evaluate(() => window.__frames || 0);
   results.push(check('render loop advancing (rAF)', framesAfter > framesBefore, `${framesBefore} -> ${framesAfter}`));
   const how = await startGame(page);
-  await page.waitForTimeout(3000);
+  await page.waitForTimeout(1500);
+  // New Game offers the first mission in a dialog; the dialog blocks
+  // movement by design, so accept it (the real user path) before the
+  // movement check. (v9 bug, fixed in main.js: the accept button used
+  // to call a function that only exists on the exposed missions API,
+  // so the dialog could never be accepted and the player stayed frozen.)
+  await acceptDialogIfOpen(page);
   const snap = await probeState(page);
-  results.push(check('game starts (title hidden)', snap.screen !== 'title', `via ${how}, screen=${snap.screen}`));
+  results.push(check('game starts (title hidden, dialog accepted)', snap.screen === 'play', `via ${how}, screen=${snap.screen}`));
   // Walk a little so the player-update path proves itself.
   await page.keyboard.down('KeyW');
   await page.waitForTimeout(1200);
@@ -254,16 +303,17 @@ async function runEdge(page, baseUrl, errors) {
   const results = [];
   await page.goto(`${baseUrl}?seed=7`, { waitUntil: 'load', timeout: 30000 });
   await page.waitForTimeout(1000);
-  results.push(check('edge: initial load', await page.locator('#game-canvas').count() > 0));
 
   // Reload keeps working and keeps the title screen.
   await page.reload({ waitUntil: 'load' });
   await page.waitForTimeout(800);
   results.push(check('edge: reload keeps title', await page.locator('#title-screen').isVisible().catch(() => false)));
 
-  // Start, then resize the viewport mid-play.
+  // Start, then accept the opening mission dialog so the checks below
+  // run in real play state (the dialog blocks movement and pause).
   await startGame(page);
   await page.waitForTimeout(1500);
+  await acceptDialogIfOpen(page);
   await page.setViewportSize({ width: 800, height: 600 });
   await page.waitForTimeout(800);
   const snap = await probeState(page);
@@ -299,6 +349,7 @@ async function runEdge(page, baseUrl, errors) {
   // Rapid key storm: no error, no freeze (frames keep advancing).
   await startGame(page);
   await page.waitForTimeout(500);
+  await acceptDialogIfOpen(page);
   const f0 = await page.evaluate(() => window.__frames || 0);
   for (const key of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyE', 'Space', 'Digit1', 'Digit2', 'KeyR', 'KeyQ']) {
     await page.keyboard.press(key);
@@ -307,43 +358,76 @@ async function runEdge(page, baseUrl, errors) {
   const f1 = await page.evaluate(() => window.__frames || 0);
   results.push(check('edge: rapid keys do not freeze loop', f1 > f0, `${f0} -> ${f1}`));
 
-  // Radio cycles (R) without throwing; station name changes when the HUD
-  // exposes it — checked best-effort through the debug hook. Only NEW
-  // errors count here; pre-existing ones (e.g. a missing shots.js) are
-  // reported by the suite-wide zero-errors check, not blamed on radio.
+  // Weapon switch (v8's weak spot — prove it, don't assume it): Rook
+  // starts with pistol + SMG. 2 must select the SMG with different ammo,
+  // 1 must go back to the pistol, Q must cycle pistol -> SMG -> pistol.
+  const wBefore = await readWeapons(page);
+  await holdKey(page, 'Digit2');
+  let wSmg = await readWeapons(page);
+  // Flake guard: the game's weapon keys are rising-edge readers, and a
+  // key event that lands exactly on a frame boundary can be missed once.
+  // One retry distinguishes that from a genuinely broken switch (which
+  // fails twice in a row); the dedicated tools/weapon-switch.mjs probe
+  // covers the same path with screenshots.
+  if (!wSmg || wSmg.current !== 'smg') {
+    await holdKey(page, 'Digit2');
+    wSmg = await readWeapons(page);
+  }
+  await holdKey(page, 'Digit1');
+  const wPistol = await readWeapons(page);
+  await holdKey(page, 'KeyQ');
+  const wCycle1 = await readWeapons(page);
+  await holdKey(page, 'KeyQ');
+  const wCycle2 = await readWeapons(page);
+  const weaponOk = wBefore && wBefore.current === 'pistol' && wBefore.owned?.smg === true
+    && wSmg && wSmg.current === 'smg' && wSmg.ammo?.smg !== wBefore.ammo?.pistol
+    && wPistol && wPistol.current === 'pistol'
+    && wCycle1 && wCycle1.current === 'smg'
+    && wCycle2 && wCycle2.current === 'pistol';
+  results.push(check('edge: weapon switch 1/2/Q (pistol <-> SMG, ammo differs)', weaponOk,
+    wBefore ? `start ${wBefore.current}(${wBefore.ammo?.pistol}) -> 2:${wSmg?.current}(${wSmg?.ammo?.smg}) -> 1:${wPistol?.current} -> Q:${wCycle1?.current} -> Q:${wCycle2?.current}` : 'no weapons hook'));
+
+  // Radio cycles (R) without throwing; the station name must change.
+  // Read through window.__game (the real debug hook); the old code read
+  // window.__cbDebug / window.G, neither of which exists, so the check
+  // passed vacuously without ever seeing a station name.
   const radioErrorsBefore = errors.length;
   const radioBefore = await page.evaluate(() => {
-    const d = window.__cbDebug || window.G || null;
-    return d?.radio?.station ?? d?.audio?.station ?? null;
+    const r = window.__game?.radio;
+    return r && typeof r.stationName === 'function' ? r.stationName() : (r?.station ?? null);
   });
-  await page.keyboard.press('KeyR');
-  await page.waitForTimeout(400);
-  await page.keyboard.press('KeyR');
-  await page.waitForTimeout(400);
+  await holdKey(page, 'KeyR');
+  const radioMid = await page.evaluate(() => {
+    const r = window.__game?.radio;
+    return r && typeof r.stationName === 'function' ? r.stationName() : (r?.station ?? null);
+  });
+  await holdKey(page, 'KeyR');
   const radioAfter = await page.evaluate(() => {
-    const d = window.__cbDebug || window.G || null;
-    return d?.radio?.station ?? d?.audio?.station ?? null;
+    const r = window.__game?.radio;
+    return r && typeof r.stationName === 'function' ? r.stationName() : (r?.station ?? null);
   });
-  results.push(check('edge: radio cycles without error',
-    errors.length === radioErrorsBefore, radioBefore !== null && radioAfter !== null && radioBefore !== radioAfter
-      ? `${radioBefore} -> ${radioAfter}` : 'no station hook exposed; keys accepted, no new errors'));
+  results.push(check('edge: radio cycles (station name changes)',
+    errors.length === radioErrorsBefore && radioBefore !== null && radioAfter !== null
+      && radioBefore !== radioMid && radioMid !== radioAfter,
+    radioBefore !== null ? `${radioBefore} -> ${radioMid} -> ${radioAfter}` : 'no radio hook exposed'));
 
-  // Save slots: write all three and read them back when the hook exists.
+  // Save slots: write all three through the real save API and read back.
   const slots = await page.evaluate(() => {
     try {
-      const d = window.__cbDebug || window.G || null;
-      if (d?.save?.writeSlot && d?.save?.readSlot) {
+      const s = window.__game?.save;
+      if (s?.saveSlot && s?.readSlot) {
         const out = [];
-        for (let i = 1; i <= 3; i += 1) {
-          d.save.writeSlot(i, { mission: i, cash: 100 * i, date: new Date().toISOString() });
-          out.push(!!d.save.readSlot(i));
+        for (let i = 0; i < 3; i += 1) {
+          s.saveSlot(i);
+          const back = s.readSlot(i);
+          out.push(back?.status === 'ok');
         }
         return out;
       }
       return null;
     } catch { return null; }
   });
-  results.push(check('edge: save slots write + read back', slots === null || slots.every(Boolean),
+  results.push(check('edge: save slots write + read back', slots !== null && slots.every(Boolean),
     slots === null ? 'no save hook exposed' : slots.join(', ')));
 
   results.push(check('edge: zero console errors', errors.length === 0, errors.slice(0, 3).join(' | ')));
