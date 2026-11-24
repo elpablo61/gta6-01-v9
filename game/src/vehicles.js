@@ -108,7 +108,7 @@ export function maybeRebuildRoute(car, G, tx, ty) {
 // Returns nothing; mutates the car. `targetSpeed` caps the speed.
 export function driveToward(car, G, dt, targetSpeed) {
   const world = G.world;
-  car._wallDamageCd = Math.max(0, (car._wallDamageCd || 0) - dt);
+  tickWallDamage(car, dt);
   let tx;
   let ty;
   if (car.route && car.routeIndex < car.route.length) {
@@ -252,14 +252,7 @@ export function driveToward(car, G, dt, targetSpeed) {
   car.y = res.y;
   if (res.hitX || res.hitY) {
     car.speed *= 0.6; // scrub speed on a wall hit
-    // Wall damage ticks at most once per 0.5s. The old clock read
-    // G.time.now, which nothing ever sets, so the throttle never
-    // engaged (a 0 timestamp is falsy and re-armed every frame).
-    if ((car._wallDamageCd || 0) <= 0) {
-      car._wallDamageCd = 0.5;
-      car.damage += 1;
-      car.hp = Math.max(0, car.hp - 1);
-    }
+    applyWallHit(car);
   }
   // Stuck detection: intended to move but barely displaced.
   if (Math.abs(car.speed) > 40 && moved < Math.abs(step) * 0.25) {
@@ -285,17 +278,33 @@ function num(v, dflt) {
   return typeof v === 'number' && Number.isFinite(v) ? v : dflt;
 }
 
+// Wall damage is throttled on a per-car cooldown, not on the game
+// clock: the clock field nothing ever set meant the throttle never
+// engaged and every wall frame dealt damage. The cooldown counts down
+// by dt; a wall hit only ticks damage while it is at zero, then re-arms
+// it for half a second. Both drivers share this one helper.
+function tickWallDamage(car, dt) {
+  car._wallDamageCd = Math.max(0, (car._wallDamageCd || 0) - dt);
+}
+function applyWallHit(car) {
+  if ((car._wallDamageCd || 0) > 0) return;
+  car._wallDamageCd = 0.5;
+  car.damage = (car.damage || 0) + 1;
+  car.hp = Math.max(0, (car.hp || 100) - 1);
+}
+
 // Manual driving: integrate the intent player.js wrote on the car
-// (car.throttle -1..1, car.steer -1..1, car.brake bool). This is the
-// ONLY place a player-driven car moves. Negative throttle brakes while
-// moving forward and reverses only from (near-)standstill, so the
-// autopilot's S-key braking and a human's S-key reversing both behave.
-// Steering is radius-based like driveToward, with the same minimum
-// turn authority at low speed.
+// (throttle -1..1, steer -1..1, brake flag). This is the ONLY place a
+// player-driven car moves, so the human and the autopilot can never
+// fight over the car: both only write intent, this function alone
+// turns it into motion. Backwards throttle brakes first and only
+// reverses from near-standstill, which makes the S key both a brake
+// and a reverse. Steering is radius-based, like the road driver, with
+// the same floor on turn authority at low speed.
 function driveManual(car, G, dt) {
   const world = G.world;
   const step = typeof dt === 'number' && dt > 0 ? dt : 0.016;
-  car._wallDamageCd = Math.max(0, (car._wallDamageCd || 0) - step);
+  tickWallDamage(car, step);
 
   // Unwedge: while the car is reversing out of a jam, nothing else
   // drives it — it backs straight along its own heading for the
@@ -316,8 +325,8 @@ function driveManual(car, G, dt) {
   const brake = !!(car.brake || car.inputBrake);
   const top = effectiveTopSpeed(car);
 
+  // Longitudinal: brake wins, then throttle, then drag when idle.
   if (brake) {
-    // Strong deceleration toward a stop.
     const dec = effectiveBrake(car) * step;
     car.speed = car.speed > 0 ? Math.max(0, car.speed - dec)
       : car.speed < 0 ? Math.min(0, car.speed + dec) : 0;
@@ -327,7 +336,6 @@ function driveManual(car, G, dt) {
     if (car.speed > 30) car.speed = Math.max(0, car.speed - effectiveBrake(car) * step);
     else car.speed = Math.max(-140, car.speed - car.accel * step);
   } else {
-    // No input: coast down with drag.
     const drag = 260 * step;
     car.speed = car.speed > 0 ? Math.max(0, car.speed - drag)
       : car.speed < 0 ? Math.min(0, car.speed + drag) : 0;
@@ -349,20 +357,12 @@ function driveManual(car, G, dt) {
   car.y = res.y;
   if (res.hitX || res.hitY) {
     car.speed *= 0.6; // scrub speed on a wall hit
-    if (car._wallDamageCd <= 0) {
-      car._wallDamageCd = 0.5;
-      car.damage = (car.damage || 0) + 1;
-      car.hp = Math.max(0, (car.hp || 100) - 1);
-    }
+    applyWallHit(car);
   }
-  // Stuck detection (the same rule the road-following driver uses):
-  // throttle held but barely displaced means wedged — back straight
-  // out. The check keys on the throttle, not on speed: grinding a wall
-  // scrubs speed to ~7 u/s (each wall hit multiplies it by 0.6), so a
-  // speed threshold never fires — the probe watched a car sit at
-  // 2-11 u/s for 30+ seconds pushing into a building face.
-  // Without this, a car grinding a building wall under throttle stays
-  // there forever.
+  // Stuck detection: judge by the throttle, not by speed. A car
+  // grinding a wall has its speed scrubbed to a crawl by the wall hits
+  // above, so a speed threshold never fires — yet the throttle is held
+  // and the car barely moves. After 1.5s of that, back straight out.
   const moved = Math.hypot(car.x - prevX, car.y - prevY);
   const trying = Math.abs(car.throttle || 0) > 0;
   if (trying && moved < Math.abs(wantStep) * 0.25) {
