@@ -14,9 +14,11 @@ found while running these suites.
 | FPS (wanted chase, 8s) | **59.3 fps** (gate ≥59) — 2/2 PASS, 0 console errors |
 | SMOKE regression | smoke-b6 **62/62**, smoke-b3 **43/43** (unchanged) |
 
-HUD proof (read visually, not just state): `screenshots/weapon-smg.jpg`
-(43,513 B) shows **SMG • 96**; `screenshots/weapon-shotgun.jpg`
-(53,146 B) shows **Shotgun • 24**.
+HUD proof (read visually, not just state): `playtest/weapon-smg.jpg`
+(43,513 B) shows **SMG • 96**; `playtest/weapon-shotgun.jpg`
+(53,146 B) shows **Shotgun • 24**. (They live under playtest/, not
+screenshots/: buildDossier counts every file in screenshots/ toward its
+4-image cap, so only the 4 poses may live there.)
 
 ## Bugs found + fixed in this suite (all in game/src, NOT main.ts)
 

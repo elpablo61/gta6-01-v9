@@ -177,6 +177,21 @@ function missionComplete(G, mission) {
 // The objective target: a marker, checkpoint, drop, courier, enemy, or any
 // point the mission wants Rook to reach. Several shapes are accepted.
 function objectiveTarget(G, mission) {
+  // The LIVE objective lives on the exposed missions object
+  // (G.missions.objective = {x, y, label, kind}, set by setupStage).
+  // The mission DEF has no target/marker/objective fields, so reading
+  // only the def always returned null here and the autopilot fell
+  // through to roam instead of driving to the marker — m1 stalled
+  // forever at stage 0 (arc progress: roam, ~250,370, never moving
+  // toward the market at 600,600).
+  const live = G && G.missions;
+  if (live && live.objective) {
+    const point = posOf(live.objective);
+    if (point) return { x: point.x, y: point.y, ref: live.objective };
+    if (typeof live.objective.x === 'number' && typeof live.objective.y === 'number') {
+      return { x: live.objective.x, y: live.objective.y, ref: live.objective };
+    }
+  }
   if (!mission) return null;
   const candidates = [
     mission.target, mission.marker, mission.checkpoint, mission.destination,
@@ -191,10 +206,11 @@ function objectiveTarget(G, mission) {
     if (candidate && typeof candidate.x === 'number') return { x: candidate.x, y: candidate.y, ref: candidate };
   }
   // Checkpoints are a list; take the first unvisited one.
-  const list = mission.checkpoints || mission.markers || mission.drops;
+  const list = mission.checkpoints || mission.markers || mission.drops
+    || (live && (live.checkpoints || live.drops));
   if (Array.isArray(list)) {
     for (const entry of list) {
-      if (entry && (entry.visited || entry.done || entry.collected)) continue;
+      if (entry && (entry.visited || entry.done || entry.collected || entry.hit)) continue;
       const point = posOf(entry);
       if (point) return { x: point.x, y: point.y, ref: entry };
     }
@@ -218,13 +234,20 @@ function missionEnemies(G, mission) {
 }
 
 function dialogOpen(G) {
+  // Authoritative first: the game state and the missions module's own
+  // dialog flag. The old code only asked currentMission() — which falls
+  // back to the m1 DEF (no dialogOpen field) while the offer is still
+  // unaccepted — and the DOM fallback below, so the autopilot never saw
+  // the dialog and the arc stalled at m1 forever (roam mode, frozen).
+  if (G && G.state === 'dialog') return true;
+  if (G && G.missions && G.missions.dialogOpen === true) return true;
   if (G.ui && (G.ui.dialogOpen === true || G.ui.dialog === true)) return true;
   if (G.dialog && G.dialog.open === true) return true;
   const mission = currentMission(G);
   if (mission && mission.dialogOpen === true) return true;
   if (typeof document !== 'undefined') {
     const el = document.getElementById('mission-dialog');
-    if (el && !el.hidden && el.offsetParent !== null) return true;
+    if (el && !el.hidden) return true;
   }
   return false;
 }
@@ -234,7 +257,7 @@ function garageMenuOpen(G) {
   if (G.ui && (G.ui.garageOpen === true || G.ui.garage === true)) return true;
   if (typeof document !== 'undefined') {
     const el = document.getElementById('garage-menu') || document.getElementById('garage-overlay');
-    if (el && !el.hidden && el.offsetParent !== null) return true;
+    if (el && !el.hidden) return true;
   }
   return false;
 }
@@ -243,7 +266,7 @@ function gameOverShown(G) {
   if (G.gameOver === true || G.state === 'gameover' || G.screen === 'gameover') return true;
   if (typeof document !== 'undefined') {
     const el = document.getElementById('game-over-screen');
-    if (el && !el.hidden && el.offsetParent !== null) return true;
+    if (el && !el.hidden) return true;
   }
   return false;
 }
@@ -252,7 +275,7 @@ function titleShown(G) {
   if (G.screen === 'title' || G.state === 'title') return true;
   if (typeof document !== 'undefined') {
     const el = document.getElementById('title-screen');
-    if (el && !el.hidden && el.offsetParent !== null) return true;
+    if (el && !el.hidden) return true;
   }
   return false;
 }
@@ -903,7 +926,12 @@ export function update(G, dt) {
   const target = objectiveTarget(G, mission);
 
   // --- Chase (m2): ram the courier. ---------------------------------------
-  const courier = mission && (mission.courier || mission.targetVehicle || mission.targetCar);
+  // The courier object lives on the exposed missions state
+  // (G.missions.courier), not on the mission DEF — reading only the def
+  // skipped this whole branch and the autopilot chased a stale objective
+  // point instead of the moving car.
+  const courier = (mission && (mission.courier || mission.targetVehicle || mission.targetCar))
+    || (G.missions && G.missions.courier);
   const isChase = /m2|tail|chase/.test(id) || !!courier;
   if (isChase && courier) {
     const courierPos = posOf(courier);

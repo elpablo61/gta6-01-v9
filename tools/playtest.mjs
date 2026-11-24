@@ -159,15 +159,24 @@ async function probeState(page) {
         };
       }
       const m = debug.missions?.current || debug.missions?.active || debug.mission || null;
+      // The exposed missions object (G.missions) carries the live arc
+      // state — stage, status, and the completed-ids list. The active
+      // mission DEF (m above) carries none of that, so read arc state
+      // off the exposed object and only the id off the def; reading
+      // stage/status/complete off the def made the arc suite blind
+      // (it could never see a mission complete).
+      const mex = debug.missions || null;
       if (m) {
         snap.mission = {
           id: m.id ?? m.name ?? null,
-          stage: m.stage ?? m.stageIndex ?? null,
-          status: m.status ?? m.state ?? null,
-          failed: m.failed ?? false,
-          complete: m.complete ?? m.completed ?? false,
+          stage: mex?.stage ?? m.stage ?? m.stageIndex ?? null,
+          status: mex?.status ?? m.status ?? m.state ?? null,
+          failed: mex?.failed ?? m.failed ?? false,
+          complete: mex?.completed?.includes?.(m.id) ?? m.complete ?? m.completed ?? false,
         };
       }
+      if (mex && Array.isArray(mex.completed)) snap.completedList = mex.completed.slice();
+      if (mex && typeof mex.index === 'number') snap.missionIndex = mex.index;
       if (typeof debug.heat === 'number') snap.heat = debug.heat;
       if (typeof debug.wanted === 'number') snap.wanted = debug.wanted;
       if (debug.autopilot) snap.autopilot = { mode: debug.autopilot.mode ?? null, enabled: debug.autopilotEnabled ?? null };
@@ -454,21 +463,29 @@ async function runArc(page, baseUrl, errors, missionFilter) {
   const seen = new Map(); // mission id -> { stage, status }
   let lastWrite = 0;
   let completed = [];
+  const completedAt = new Map(); // mission id -> seconds since start
   let failed = null;
 
   fs.appendFileSync(ARC_PROGRESS, `\n=== arc run ${new Date().toISOString()} mission=${missionFilter || 'all'} ===\n`);
   while (Date.now() < deadline) {
     const snap = await probeState(page);
+    // Source of truth for completion: the exposed completed-ids list
+    // (G.missions.completed), not the active def, which never changes.
+    if (Array.isArray(snap.completedList)) {
+      for (const id of snap.completedList) {
+        if (!completed.includes(id)) {
+          completed.push(id);
+          completedAt.set(id, Math.round((Date.now() - startedAt) / 1000));
+        }
+      }
+    }
     const mid = snap.mission?.id || 'none';
     const stage = snap.mission?.stage ?? '?';
     const status = snap.mission?.complete ? 'complete' : (snap.mission?.failed ? 'failed' : (snap.mission?.status || 'active'));
     const key = `${mid}#${stage}`;
     if (!seen.has(key)) seen.set(key, { at: Date.now() - startedAt, status });
-    if (snap.mission?.complete) {
-      if (!completed.includes(mid)) completed.push(mid);
-      if (missionFilter && mid.toLowerCase().includes(missionFilter.toLowerCase())) break;
-      if (!missionFilter && completed.length >= 12) break;
-    }
+    if (missionFilter && completed.some((m) => m.toLowerCase().includes(missionFilter.toLowerCase()))) break;
+    if (!missionFilter && completed.length >= 12) break;
     if (snap.mission?.failed) { failed = mid; break; }
     if (Date.now() - lastWrite >= 2000) {
       lastWrite = Date.now();
@@ -485,15 +502,16 @@ async function runArc(page, baseUrl, errors, missionFilter) {
     await page.waitForTimeout(500);
   }
   const elapsed = Math.round((Date.now() - startedAt) / 1000);
-  fs.appendFileSync(ARC_PROGRESS, `=== arc end t=${elapsed}s completed=${completed.join(',') || 'none'} failed=${failed || 'none'} ===\n`);
+  const perMission = completed.map((id) => `${id}@${completedAt.get(id) ?? '?'}s`).join(', ');
+  fs.appendFileSync(ARC_PROGRESS, `=== arc end t=${elapsed}s completed=${completed.join(',') || 'none'} failed=${failed || 'none'} perMission=${perMission} ===\n`);
 
   results.push(check('arc: autopilot engaged', true, `ran ${elapsed}s`));
   if (missionFilter) {
     results.push(check(`arc: mission ${missionFilter} completed`, completed.some((m) => m.toLowerCase().includes(missionFilter.toLowerCase())),
-      `completed: ${completed.join(', ') || 'none'}; failed: ${failed || 'none'}`));
+      `completed: ${completed.join(', ') || 'none'}; per-mission: ${perMission || 'none'}; failed: ${failed || 'none'}`));
   } else {
     results.push(check('arc: all 12 missions completed', completed.length >= 12,
-      `completed ${completed.length}/12: ${completed.join(', ') || 'none'}; failed: ${failed || 'none'}`));
+      `completed ${completed.length}/12: ${completed.join(', ') || 'none'}; per-mission: ${perMission || 'none'}; failed: ${failed || 'none'}`));
   }
   results.push(check('arc: zero console errors', errors.length === 0, errors.slice(0, 3).join(' | ')));
   return results;
