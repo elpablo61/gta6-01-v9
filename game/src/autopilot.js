@@ -701,14 +701,9 @@ function driveToward(G, state, target, cruise, opts) {
   // Escape mode never brakes for arrival at all.
   const closeIn = !ram && !escaping && distance < 140 && speed > 60;
   if (needBrake || closeIn) {
-    // DRAG-BRAKE (B14): S is not a brake in this car — the probe
-    // watched a full second of held S at v=355 lose zero speed, so
-    // braking with S arrives at the turn too fast, overshoots the
-    // junction off-road, and pays for it in recovery. Release
-    // everything and let drag (260/s^2) do the slowing, as
-    // steerAndThrottle's brake-cap already does.
     keys.release('KeyW');
-    keys.release('KeyS');
+    if (speed > 60) keys.hold('KeyS');
+    else keys.release('KeyS');
     state.dbgDrive = 'brake';
   } else if (speed < cruise) {
     keys.hold('KeyW');
@@ -2056,14 +2051,7 @@ export function update(G, dt) {
         }
       }
       setMode(G, 'drive');
-      // B14: driveChaseFast, not driveToward. driveToward stops and
-      // rotates in place at every sharp junction turn, which cost
-      // ~40-45s per leg (m3 116s, m4 85s, m5 96s, m6 270s in arc #1)
-      // and left no time for m8-m12. The fast driver turns through
-      // junctions at speed on the cached road route (proven at 420
-      // in the m2 probe) and its 60-unit arrival radius matches the
-      // missions' own nearObjective radius (60).
-      driveChaseFast(G, state, target, cruise);
+      driveToward(G, state, target, cruise);
       G.autopilotDrove = true;
       G.autopilot_drove = true;
       return;
