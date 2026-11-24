@@ -1137,14 +1137,67 @@ function waypointPassed(p, wp, next, heading) {
   return Math.abs(angleDiff(outAngle, heading)) < 1.0;
 }
 
+// The point on the road route `lookahead` units ahead of the car's
+// projection onto it. The aim MUST lie on the polyline: aiming at
+// the next waypoint beyond the lookahead (the first version of this
+// driver) points the car straight at a junction a full block past
+// the one it still has to turn at, so the car cuts diagonally across
+// the building block instead of driving up to the junction and
+// turning — probe #1 went off-road 76s in 22 episodes, nearly all
+// starting just past a junction. Walking the polyline keeps the aim
+// on the asphalt: up the road the car is on, then around the corner
+// on the outgoing leg, so the chord to the aim always passes through
+// the junction box instead of through the block.
+function lookaheadPoint(p, route, lookahead) {
+  if (route.length < 2) return route[route.length - 1];
+  let bestSeg = 0;
+  let bestT = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < route.length - 1; i += 1) {
+    const a = route[i];
+    const b = route[i + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy || 1;
+    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+    t = clamp(t, 0, 1);
+    const d = dist(p.x, p.y, a.x + dx * t, a.y + dy * t);
+    if (d < bestD) { bestD = d; bestSeg = i; bestT = t; }
+  }
+  let remaining = lookahead;
+  const segA = route[bestSeg];
+  const segB = route[bestSeg + 1];
+  const segLen = dist(segA.x, segA.y, segB.x, segB.y) || 1;
+  const leftInSeg = (1 - bestT) * segLen;
+  if (remaining <= leftInSeg) {
+    const px = segA.x + (segB.x - segA.x) * bestT;
+    const py = segA.y + (segB.y - segA.y) * bestT;
+    return {
+      x: px + ((segB.x - segA.x) / segLen) * remaining,
+      y: py + ((segB.y - segA.y) / segLen) * remaining,
+    };
+  }
+  remaining -= leftInSeg;
+  for (let i = bestSeg + 1; i < route.length - 1; i += 1) {
+    const a = route[i];
+    const b = route[i + 1];
+    const len = dist(a.x, a.y, b.x, b.y) || 1;
+    if (remaining <= len) {
+      return { x: a.x + ((b.x - a.x) / len) * remaining, y: a.y + ((b.y - a.y) / len) * remaining };
+    }
+    remaining -= len;
+  }
+  return route[route.length - 1];
+}
+
 // Fast chase driver: pure pursuit along the cached road route to a
-// fixed point (the intercept park point). The aim is the first route
-// waypoint at or beyond a speed-scaled lookahead (90-220 units), so
-// the car starts its turn before the junction and arcs through it
-// instead of stopping to rotate — the road-mode caps in
-// steerAndThrottle (180 for a 90-degree turn, 110 for a hairpin)
-// keep the speed inside the turning radius. No stop-and-rotate while
-// moving on this path.
+// fixed point (the intercept park point). The aim is the point on
+// the road polyline at a speed-scaled lookahead (90-220 units) from
+// the car's projection onto it, so the car starts its turn before
+// the junction and arcs through it instead of stopping to rotate —
+// the road-mode caps in steerAndThrottle (180 for a 90-degree turn,
+// 110 for a hairpin) keep the speed inside the turning radius.
+// No stop-and-rotate while moving on this path.
 function driveChaseFast(G, state, target, cruise) {
   const p = playerPos(G);
   const vehicle = playerVehicle(G);
@@ -1176,10 +1229,7 @@ function driveChaseFast(G, state, target, cruise) {
     return true;
   }
   const lookahead = clamp(Math.abs(speed) * 0.45, 90, 220);
-  let aim = route[route.length - 1];
-  for (const wp of route) {
-    if (dist(p.x, p.y, wp.x, wp.y) >= lookahead) { aim = wp; break; }
-  }
+  const aim = lookaheadPoint(p, route, lookahead);
   const wpDist = dist(p.x, p.y, route[0].x, route[0].y);
   steerAndThrottle(G, state, aim, cruise, speed, heading, { route, waypointDist: wpDist });
   return true;
