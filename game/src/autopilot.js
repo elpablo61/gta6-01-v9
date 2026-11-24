@@ -760,6 +760,25 @@ function pickIntercept(G, state, courier, courierPos, playerPos, playerTop) {
   return null;
 }
 
+// Is the point 55 units ahead of the car open ground? The m2 start
+// often leaves the car off-road inside a block, and creeping forward
+// while rotating grinds it against the nearest building (probe: speed
+// stuck at 7-8 u/s, position frozen for 40+ seconds). Ask the world
+// when it can answer; without a query, assume open.
+function noseClear(G, p, heading) {
+  const world = G.world || {};
+  const nx = p.x + Math.cos(heading) * 55;
+  const ny = p.y + Math.sin(heading) * 55;
+  try {
+    if (typeof world.pointInBuilding === 'function') return !world.pointInBuilding(nx, ny, 0);
+    if (typeof world.isBlocked === 'function') return !world.isBlocked(nx, ny);
+    if (typeof world.isSolid === 'function') return !world.isSolid(nx, ny);
+  } catch {
+    // A failed query must not stall the chase; assume open.
+  }
+  return true;
+}
+
 // Steer toward an aim point and work the throttle. Direct mode (closing
 // on the courier) never brakes. Road mode eases off only to a cap speed
 // ahead of a sharp junction turn — a cap, not a stop — and rotates in
@@ -771,12 +790,19 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
   const desired = Math.atan2(aim.y - p.y, aim.x - p.x);
   const diff = angleDiff(desired, heading);
 
-  if (Math.abs(diff) > 1.2 && speed < 50) {
+  if (Math.abs(diff) > 1.2 && Math.abs(speed) < 50) {
     keys.release('KeyW');
     keys.release('KeyS');
     if (diff > 0) { keys.hold('KeyD'); keys.release('KeyA'); }
     else { keys.hold('KeyA'); keys.release('KeyD'); }
-    if (speed < 25) keys.hold('KeyW');
+    // Creep only into open space. When the nose is blocked, back out
+    // instead: reversing while steering turns the nose the same way,
+    // so the car backs out of the block while still rotating toward
+    // the target, instead of grinding against the wall forever.
+    if (Math.abs(speed) < 25) {
+      if (noseClear(G, p, heading)) keys.hold('KeyW');
+      else keys.hold('KeyS');
+    }
     return;
   }
   if (diff > 0.08) { keys.hold('KeyD'); keys.release('KeyA'); }
@@ -789,6 +815,8 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
     return;
   }
   // Road mode: brake only to a cap speed ahead of a sharp turn.
+  // Speed here is a magnitude: a reversing car must not read as slow.
+  const mag = Math.abs(speed);
   let cap = cruise;
   const route = (opts && opts.route) || [];
   if (route.length > 1) {
@@ -801,7 +829,7 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
     if (turn > 1.5 && wpDist < 320) cap = Math.min(cap, 200);
     else if (turn > 0.9 && wpDist < 300) cap = Math.min(cap, 290);
   }
-  if (speed > cap) {
+  if (mag > cap) {
     keys.release('KeyW');
     keys.hold('KeyS');
   } else {
@@ -818,6 +846,19 @@ function driveChase(G, state, courier, courierPos) {
   const playerTop = Math.max(200, topSpeedOf(vehicle));
   const now = state.now;
   const dCourier = dist(p.x, p.y, courierPos.x, courierPos.y);
+
+  // A courier slowed by two or more hits crawls (under ~150 u/s): no
+  // ambush is needed — the player is many times faster, so steer
+  // straight at it and drive it down. The intercept machinery only
+  // earns its keep while the courier is fast; against a crawling
+  // courier it just keeps re-picking junctions and the car spends the
+  // chase rotating toward a target that keeps moving (the probe's
+  // 4th hit took ~70s this way, with the player creeping at 7 u/s).
+  if (speedOf(courier) < 150) {
+    const aimSlow = predictPosition(courier, courierPos, p, playerTop);
+    steerAndThrottle(G, state, aimSlow, playerTop, speed, heading, { direct: true });
+    return true;
+  }
 
   // The ambush is kept until it goes stale — the courier passed it, the
   // courier's route no longer runs through it, or it is 8 seconds old.

@@ -296,6 +296,21 @@ function driveManual(car, G, dt) {
   const world = G.world;
   const step = typeof dt === 'number' && dt > 0 ? dt : 0.016;
   car._wallDamageCd = Math.max(0, (car._wallDamageCd || 0) - step);
+
+  // Unwedge: while the car is reversing out of a jam, nothing else
+  // drives it — it backs straight along its own heading for the
+  // duration, then normal intent resumes.
+  if ((car.reverseTimer || 0) > 0) {
+    car.reverseTimer -= step;
+    const back = -90 * step;
+    const res = moveWithCollision(world, car.x, car.y, Math.cos(car.angle) * back, Math.sin(car.angle) * back, 16);
+    car.x = res.x;
+    car.y = res.y;
+    car.speed = -90;
+    car.lastX = car.x;
+    car.lastY = car.y;
+    return;
+  }
   const throttle = num(car.throttle !== undefined ? car.throttle : car.inputThrottle, 0);
   const steer = num(car.steer !== undefined ? car.steer : car.inputSteer, 0);
   const brake = !!(car.brake || car.inputBrake);
@@ -326,8 +341,10 @@ function driveManual(car, G, dt) {
     car.angle += steer * turnRate * step;
   }
 
-  const dist = car.speed * step;
-  const res = moveWithCollision(world, car.x, car.y, Math.cos(car.angle) * dist, Math.sin(car.angle) * dist, 16);
+  const wantStep = car.speed * step;
+  const prevX = car.x;
+  const prevY = car.y;
+  const res = moveWithCollision(world, car.x, car.y, Math.cos(car.angle) * wantStep, Math.sin(car.angle) * wantStep, 16);
   car.x = res.x;
   car.y = res.y;
   if (res.hitX || res.hitY) {
@@ -337,6 +354,21 @@ function driveManual(car, G, dt) {
       car.damage = (car.damage || 0) + 1;
       car.hp = Math.max(0, (car.hp || 100) - 1);
     }
+  }
+  // Stuck detection (the same rule the road-following driver uses):
+  // trying to move fast but barely displaced means wedged — back
+  // straight out. Without this, a car grinding a building wall under
+  // throttle stays there forever: the probe watched one sit at 7 u/s
+  // for 40+ seconds at the m2 start.
+  const moved = Math.hypot(car.x - prevX, car.y - prevY);
+  if (Math.abs(car.speed) > 40 && moved < Math.abs(wantStep) * 0.25) {
+    car.stuckTimer = (car.stuckTimer || 0) + step;
+    if (car.stuckTimer > 1.5) {
+      car.stuckTimer = 0;
+      car.reverseTimer = 0.8;
+    }
+  } else {
+    car.stuckTimer = Math.max(0, (car.stuckTimer || 0) - step * 2);
   }
   car.lastX = car.x;
   car.lastY = car.y;
