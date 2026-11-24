@@ -253,6 +253,8 @@ export function findRoute(world, sx, sy, tx, ty) {
   }
   for (const id of ids) {
     const j = junctionXY(id);
+    const lastPt = points[points.length - 1];
+    if (lastPt && Math.abs(lastPt.x - j.x) < 1 && Math.abs(lastPt.y - j.y) < 1) continue;
     points.push({ x: j.x, y: j.y });
   }
   // Final leg: end road point (if the target is off-road) then target.

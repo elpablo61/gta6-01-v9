@@ -116,7 +116,7 @@ export function driveToward(car, G, dt, targetSpeed) {
       const wp = car.route[car.routeIndex];
       const dx = wp.x - car.x;
       const dy = wp.y - car.y;
-      if (dx * dx + dy * dy < 28 * 28) car.routeIndex++;
+      if (dx * dx + dy * dy < 16 * 16) car.routeIndex++;
       else break;
     }
     if (car.routeIndex >= car.route.length) {
@@ -126,6 +126,48 @@ export function driveToward(car, G, dt, targetSpeed) {
     }
     tx = car.route[car.routeIndex].x;
     ty = car.route[car.routeIndex].y;
+    // Centreline aim: on an axis-aligned leg (junction to junction),
+    // aim at a lookahead point ON the leg's centreline instead of at
+    // the raw waypoint. Aiming at the waypoint alone lets a small
+    // heading error leave a persistent lateral offset that drifts the
+    // car off the 64-wide road (seen in Node test: truck 41+ units off
+    // the y=2600 centreline). Projecting onto the leg pulls the car
+    // back to the centreline.
+    if (car.routeIndex > 0) {
+      const prev = car.route[car.routeIndex - 1];
+      const cur = car.route[car.routeIndex];
+      const look = Math.max(60, Math.abs(car.speed) * 0.4);
+      if (prev.x === cur.x) {
+        const dir = Math.sign(cur.y - prev.y) || 1;
+        const aheadY = car.y + dir * look;
+        ty = dir > 0 ? Math.min(aheadY, cur.y) : Math.max(aheadY, cur.y);
+        tx = cur.x;
+      } else if (prev.y === cur.y) {
+        const dir = Math.sign(cur.x - prev.x) || 1;
+        const aheadX = car.x + dir * look;
+        tx = dir > 0 ? Math.min(aheadX, cur.x) : Math.max(aheadX, cur.x);
+        ty = cur.y;
+      }
+    } else if (car.route.length > 1) {
+      // First leg: car position -> first junction. The leg runs along
+      // the road the car is already on; aim at the junction's line
+      // (not the raw diagonal) so a car that finished its last route
+      // slightly off-centre steers back onto the centreline instead
+      // of cutting across the block corner.
+      const wp0 = car.route[0];
+      const look = Math.max(60, Math.abs(car.speed) * 0.4);
+      if (Math.abs(car.x - wp0.x) <= Math.abs(car.y - wp0.y)) {
+        const dir = Math.sign(wp0.y - car.y) || 1;
+        const aheadY = car.y + dir * look;
+        ty = dir > 0 ? Math.min(aheadY, wp0.y) : Math.max(aheadY, wp0.y);
+        tx = wp0.x;
+      } else {
+        const dir = Math.sign(wp0.x - car.x) || 1;
+        const aheadX = car.x + dir * look;
+        tx = dir > 0 ? Math.min(aheadX, wp0.x) : Math.max(aheadX, wp0.x);
+        ty = wp0.y;
+      }
+    }
   } else if (car.target) {
     tx = car.target.x;
     ty = car.target.y;
@@ -178,7 +220,7 @@ export function driveToward(car, G, dt, targetSpeed) {
   // at low speed, plus crawl-forward turns: the car always turns at
   // least a little while moving, and can creep forward while turning.
   const radius = effectiveTurnRadius(car);
-  const moving = Math.max(Math.abs(car.speed), 24); // min authority
+  const moving = Math.max(Math.abs(car.speed), 60); // min authority
   let turnRate = moving / radius;
   // Cap the turn rate so high-speed turns stay inside the road.
   turnRate = Math.min(turnRate, 2.4);
