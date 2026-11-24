@@ -54,7 +54,8 @@ function justPressed(G, code) {
   if (!inp) return false;
   const tryFn = (fn) => {
     if (typeof fn !== 'function') return null;
-    try { return !!fn(code); } catch { return false; }
+    // Call with the input object as `this`: the readers use this._pressed.
+    try { return !!fn.call(inp, code); } catch { return false; }
   };
   let hit = tryFn(inp.pressed);
   if (hit !== null) return hit;
