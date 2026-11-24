@@ -9,7 +9,7 @@
 // Autopilot API: openMenu(), buyCheapest(), closeMenu(), menuOpen flag.
 
 export const GARAGE_X = 1000;
-export const GARAGE_Y = 1400;
+export const GARAGE_Y = 2200;
 export const GARAGE_RADIUS = 130;
 
 export const PAINT_COLORS = [

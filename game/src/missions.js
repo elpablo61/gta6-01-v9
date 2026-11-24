@@ -27,7 +27,7 @@ const PLACE = {
   hideout: { x: 600, y: 2600 },
   docks: { x: 2600, y: 2200 },
   bank: { x: 1800, y: 1000 },
-  garage: { x: 1000, y: 600 },
+  garage: { x: 1000, y: 2200 },
 };
 
 const MISSION_DEFS = [

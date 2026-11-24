@@ -252,7 +252,7 @@ function seedWorldCrates(G) {
   const w = ensureWeapons(G);
   if (w._cratesSeeded) return;
   w._cratesSeeded = true;
-  const store = place(G, 'gunstore', 1400, 1000);
+  const store = place(G, 'gunStore', 1000, 1400);
   const docks = place(G, 'docks', 2600, 2600);
   const hideout = place(G, 'hideout', 600, 600);
   w.crates.push({ x: store.x, y: store.y, weapon: 'smg', taken: false });

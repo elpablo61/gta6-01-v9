@@ -92,6 +92,8 @@ function findSprayShop(G) {
     w.sprayShop,
     w.spray,
     G.sprayShop,
+    w.places && w.places.sprayShop,
+    w.places && w.places.spray,
     w.locations && w.locations.sprayShop,
     w.locations && w.locations.spray,
   ];

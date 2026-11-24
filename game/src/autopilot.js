@@ -124,8 +124,10 @@ function isDriving(G) {
 
 function allVehicles(G) {
   const v = G.vehicles;
-  if (Array.isArray(v)) return v;
+  // G.vehicles is an array carrying a .list (see vehicles.js init):
+  // the live cars are in .list, the array itself is always empty.
   if (v && Array.isArray(v.list)) return v.list;
+  if (Array.isArray(v)) return v;
   if (v && Array.isArray(v.all)) return v.all;
   if (v && Array.isArray(v.parked)) return v.parked;
   return [];
@@ -257,13 +259,13 @@ function titleShown(G) {
 
 function sprayShopPos(G) {
   const w = G.world || {};
-  return posOf(w.sprayShop) || posOf(w.spray) || posOf(w.spray_shop)
+  return posOf(w.places && w.places.sprayShop) || posOf(w.sprayShop) || posOf(w.spray) || posOf(w.spray_shop)
     || posOf(G.sprayShop) || { x: 600, y: 600 };
 }
 
 function garagePos(G) {
   const w = G.world || {};
-  return posOf(w.garage) || posOf(w.fixerGarage) || posOf(w.fixer_garage)
+  return posOf(w.places && w.places.garage) || posOf(w.garage) || posOf(w.fixerGarage) || posOf(w.fixer_garage)
     || posOf(G.garage) || posOf(G.garage && G.garage.position) || { x: 1000, y: 1000 };
 }
 
