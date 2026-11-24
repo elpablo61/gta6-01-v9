@@ -561,7 +561,12 @@ function setMode(G, mode) {
 
 // Drive toward a point. Returns true when the autopilot drove this frame
 // (so the caller must skip manual driving and set the flag).
-function driveToward(G, state, target, cruise) {
+// opts.ram: ramming run — hold full throttle straight at the target and
+// never brake for arrival: a ram only registers above 120 u/s, and the
+// closeIn brake (<= 60 within 140) made m2 hits impossible — the car
+// always arrived at the courier too slow to count.
+function driveToward(G, state, target, cruise, opts) {
+  const ram = !!(opts && opts.ram);
   const p = playerPos(G);
   const vehicle = playerVehicle(G);
   const heading = headingOf(vehicle || G.player);
@@ -628,9 +633,9 @@ function driveToward(G, state, target, cruise) {
   const outAngle = Math.atan2(nextWp.y - waypoint.y, nextWp.x - waypoint.x);
   const turnAtWp = Math.abs(angleDiff(outAngle, inAngle));
   const wpDist = dist(p.x, p.y, waypoint.x, waypoint.y);
-  const needBrake = (Math.abs(diff) > 0.55 && speed > 120)
-    || (turnAtWp > 0.9 && wpDist < 260 && speed > 60);
-  const closeIn = distance < 140;
+  const needBrake = ram ? false : ((Math.abs(diff) > 0.55 && speed > 120)
+    || (turnAtWp > 0.9 && wpDist < 260 && speed > 60));
+  const closeIn = !ram && distance < 140;
   if (needBrake || closeIn) {
     keys.release('KeyW');
     if (speed > 60) keys.hold('KeyS');
@@ -1009,14 +1014,11 @@ export function update(G, dt) {
         return;
       }
       // Driving: cruise 520, ram inside 70 while faster than 120.
-      const speed = speedOf(playerVehicle(G));
+      // Inside 260, hold full throttle straight at the courier (ram
+      // mode): driveToward's arrival brake would slow the car below
+      // the 120 a hit needs to register, so m2 could never land one.
       const d = dist(p.x, p.y, courierPos.x, courierPos.y);
-      if (d < RAM_RANGE + 60 && speed > RAM_MIN_SPEED) {
-        // Aim straight at the courier for the ram.
-        driveToward(G, state, courierPos, CHASE_CRUISE);
-      } else {
-        driveToward(G, state, courierPos, CHASE_CRUISE);
-      }
+      driveToward(G, state, courierPos, CHASE_CRUISE, { ram: d < 260 });
       G.autopilotDrove = true;
       G.autopilot_drove = true;
       return;
