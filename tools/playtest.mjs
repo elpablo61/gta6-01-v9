@@ -159,12 +159,12 @@ async function probeState(page) {
         };
       }
       const m = debug.missions?.current || debug.missions?.active || debug.mission || null;
-      // The exposed missions object (G.missions) carries the live arc
-      // state — stage, status, and the completed-ids list. The active
-      // mission DEF (m above) carries none of that, so read arc state
-      // off the exposed object and only the id off the def; reading
-      // stage/status/complete off the def made the arc suite blind
-      // (it could never see a mission complete).
+      // Live arc state (stage, status, completed ids) sits on the
+      // exposed missions object (G.missions), not on the active mission
+      // DEF — the def carries none of it, so reading stage/status/
+      // complete off the def made the arc suite blind: it could never
+      // see a mission complete. Take the id off the def, everything
+      // else off the exposed object.
       const mex = debug.missions || null;
       if (m) {
         snap.mission = {
@@ -214,22 +214,20 @@ async function startGame(page) {
 
 // New Game offers the first mission in a dialog that blocks play; click
 // Accept (the real user path) when it is open so later checks run in play.
-// The offer appears on a ~1.2s timer after New Game, so WAIT for it
-// (up to 4s) instead of checking once — a too-early check leaves the
-// dialog open and every later key-driven check (weapons, radio) runs in
-// dialog state, where the game loop does not call module updates at all.
+// The offer appears on a ~1.2s timer after New Game, so WAIT for it (up
+// to 4s) instead of checking once — a too-early check leaves the dialog
+// open and every later key-driven check (weapons, radio) runs in dialog
+// state, where the game loop does not call module updates at all.
 async function acceptDialogIfOpen(page) {
+  const dlg = page.locator('#mission-dialog');
+  const appeared = await dlg.waitFor({ state: 'visible', timeout: 4000 })
+    .then(() => true).catch(() => false);
+  if (!appeared) return; // no dialog offered (e.g. mid-arc) — nothing to accept
   try {
-    const dlg = page.locator('#mission-dialog');
-    try {
-      await dlg.waitFor({ state: 'visible', timeout: 4000 });
-    } catch {
-      return; // no dialog offered (e.g. mid-arc) — nothing to accept
-    }
     await page.locator('#accept-btn').click({ timeout: 2000 });
     await dlg.waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
     await page.waitForTimeout(300);
-  } catch { /* dialog already gone */ }
+  } catch (e) { /* dialog already gone */ }
 }
 
 // Read the live weapon state through the game's own debug hook.
@@ -238,6 +236,15 @@ async function readWeapons(page) {
     const w = window.__game?.weapons;
     if (!w) return null;
     return { current: w.current, owned: { ...w.owned }, ammo: { ...w.ammo } };
+  });
+}
+
+// The current radio station name through the game's own debug hook.
+async function stationName(page) {
+  return page.evaluate(() => {
+    const r = window.__game?.radio;
+    if (!r) return null;
+    return typeof r.stationName === 'function' ? r.stationName() : (r.station ?? null);
   });
 }
 
@@ -274,9 +281,11 @@ async function runCold(page, baseUrl, errors) {
   const titleVisible = await page.locator('#title-screen').isVisible().catch(() => false);
   results.push(check('title screen visible', titleVisible));
   // Gate: the title screen lists 3 save slots.
-  const slotCount = await page.locator('#save-slots .slot-btn').count().catch(() => 0);
-  const slotTexts = await page.locator('#save-slots .slot-btn').allTextContents().catch(() => []);
-  results.push(check('title shows 3 save slots', slotCount === 3, slotTexts.map((t) => t.replace(/\s+/g, ' ').trim()).join(' | ')));
+  const slots = await page.locator('#save-slots .slot-btn');
+  const slotCount = await slots.count().catch(() => 0);
+  const slotTexts = await slots.allTextContents().catch(() => []);
+  const slotSummary = slotTexts.map((t) => t.replace(/\s+/g, ' ').trim()).join(' | ');
+  results.push(check('title shows 3 save slots', slotCount === 3, slotSummary));
   const framesBefore = await page.evaluate(() => window.__frames || 0);
   await page.waitForTimeout(1000);
   const framesAfter = await page.evaluate(() => window.__frames || 0);
@@ -370,6 +379,11 @@ async function runEdge(page, baseUrl, errors) {
   // Weapon switch (v8's weak spot — prove it, don't assume it): Rook
   // starts with pistol + SMG. 2 must select the SMG with different ammo,
   // 1 must go back to the pistol, Q must cycle pistol -> SMG -> pistol.
+  // Normalize first: the rapid-key storm above presses Digit2 and can
+  // leave the weapon on SMG, so press 1 and confirm pistol before the
+  // "starts with pistol" assertion — otherwise the check fails on test
+  // order, not on the game.
+  await holdKey(page, 'Digit1');
   const wBefore = await readWeapons(page);
   await holdKey(page, 'Digit2');
   let wSmg = await readWeapons(page);
@@ -401,20 +415,11 @@ async function runEdge(page, baseUrl, errors) {
   // window.__cbDebug / window.G, neither of which exists, so the check
   // passed vacuously without ever seeing a station name.
   const radioErrorsBefore = errors.length;
-  const radioBefore = await page.evaluate(() => {
-    const r = window.__game?.radio;
-    return r && typeof r.stationName === 'function' ? r.stationName() : (r?.station ?? null);
-  });
+  const radioBefore = await stationName(page);
   await holdKey(page, 'KeyR');
-  const radioMid = await page.evaluate(() => {
-    const r = window.__game?.radio;
-    return r && typeof r.stationName === 'function' ? r.stationName() : (r?.station ?? null);
-  });
+  const radioMid = await stationName(page);
   await holdKey(page, 'KeyR');
-  const radioAfter = await page.evaluate(() => {
-    const r = window.__game?.radio;
-    return r && typeof r.stationName === 'function' ? r.stationName() : (r?.station ?? null);
-  });
+  const radioAfter = await stationName(page);
   results.push(check('edge: radio cycles (station name changes)',
     errors.length === radioErrorsBefore && radioBefore !== null && radioAfter !== null
       && radioBefore !== radioMid && radioMid !== radioAfter,
@@ -424,17 +429,14 @@ async function runEdge(page, baseUrl, errors) {
   const slots = await page.evaluate(() => {
     try {
       const s = window.__game?.save;
-      if (s?.saveSlot && s?.readSlot) {
-        const out = [];
-        for (let i = 0; i < 3; i += 1) {
-          s.saveSlot(i);
-          const back = s.readSlot(i);
-          out.push(back?.status === 'ok');
-        }
-        return out;
+      if (!s?.saveSlot || !s?.readSlot) return null;
+      const out = [];
+      for (let i = 0; i < 3; i += 1) {
+        s.saveSlot(i);
+        out.push(s.readSlot(i)?.status === 'ok');
       }
-      return null;
-    } catch { return null; }
+      return out;
+    } catch (e) { return null; }
   });
   results.push(check('edge: save slots write + read back', slots !== null && slots.every(Boolean),
     slots === null ? 'no save hook exposed' : slots.join(', ')));
@@ -471,12 +473,12 @@ async function runArc(page, baseUrl, errors, missionFilter) {
     const snap = await probeState(page);
     // Source of truth for completion: the exposed completed-ids list
     // (G.missions.completed), not the active def, which never changes.
+    // Stamp each newly seen id with its completion second.
     if (Array.isArray(snap.completedList)) {
       for (const id of snap.completedList) {
-        if (!completed.includes(id)) {
-          completed.push(id);
-          completedAt.set(id, Math.round((Date.now() - startedAt) / 1000));
-        }
+        if (completed.includes(id)) continue;
+        completed.push(id);
+        completedAt.set(id, Math.round((Date.now() - startedAt) / 1000));
       }
     }
     const mid = snap.mission?.id || 'none';
