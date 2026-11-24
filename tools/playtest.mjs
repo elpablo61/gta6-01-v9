@@ -308,7 +308,10 @@ async function runEdge(page, baseUrl, errors) {
   results.push(check('edge: rapid keys do not freeze loop', f1 > f0, `${f0} -> ${f1}`));
 
   // Radio cycles (R) without throwing; station name changes when the HUD
-  // exposes it — checked best-effort through the debug hook.
+  // exposes it — checked best-effort through the debug hook. Only NEW
+  // errors count here; pre-existing ones (e.g. a missing shots.js) are
+  // reported by the suite-wide zero-errors check, not blamed on radio.
+  const radioErrorsBefore = errors.length;
   const radioBefore = await page.evaluate(() => {
     const d = window.__cbDebug || window.G || null;
     return d?.radio?.station ?? d?.audio?.station ?? null;
@@ -322,8 +325,8 @@ async function runEdge(page, baseUrl, errors) {
     return d?.radio?.station ?? d?.audio?.station ?? null;
   });
   results.push(check('edge: radio cycles without error',
-    errors.length === 0, radioBefore !== null && radioAfter !== null && radioBefore !== radioAfter
-      ? `${radioBefore} -> ${radioAfter}` : 'no station hook exposed; keys accepted'));
+    errors.length === radioErrorsBefore, radioBefore !== null && radioAfter !== null && radioBefore !== radioAfter
+      ? `${radioBefore} -> ${radioAfter}` : 'no station hook exposed; keys accepted, no new errors'));
 
   // Save slots: write all three and read them back when the hook exists.
   const slots = await page.evaluate(() => {
