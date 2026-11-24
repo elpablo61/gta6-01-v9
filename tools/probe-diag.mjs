@@ -96,6 +96,11 @@ async function snapshot(page) {
       out.cRouteLen = Array.isArray(c.route) ? c.route.length : null;
       out.dist = Math.round(Math.hypot((p.x || 0) - c.x, (p.y || 0) - c.y));
     }
+    // B9 branch telemetry: the autopilot publishes one plain object per
+    // frame (G.chaseDebug) — branch, throttle/steer the car actually
+    // got, keys held vs keys the input module sees, courier dest,
+    // mission timer. Pass it through whole; the log line formats it.
+    out.dbg = G.chaseDebug || null;
     return out;
   });
 }
@@ -115,6 +120,12 @@ async function main() {
   let closeOffRoadSecs = 0; // off-road while courier within 250 (recovery gate shut)
   let lastHits = 0;
   let restarts = 0;
+  // B9 freeze detector: rounded player position unchanged across
+  // samples. The v12 arc froze pixel-identical for ~580s, so 10s of
+  // no movement is the tripwire — dump the full debug object then.
+  let freezePos = null;
+  let freezeSecs = 0;
+  let maxFreezeSecs = 0;
   try {
     const page = await (await browser.newContext({ viewport: { width: 1280, height: 720 } })).newPage();
     page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
@@ -158,7 +169,16 @@ async function main() {
           offRoadSecs += 1;
           if (typeof s.dist === 'number' && s.dist <= 250) closeOffRoadSecs += 1;
         }
-        say(`t=${t}s hits=${s.hits} tl=${s.timeLeft} p=(${s.px},${s.py}) a=${s.angle} v=${s.speed} onRoad=${s.onRoad} courier=(${s.cx},${s.cy}) a=${s.cAngle} ${s.cSpeed}/${s.cCruise} dest=${s.cDest} route=${s.cRouteLen} dist=${s.dist} mode=${s.mode} rt=${s.routeTarget || '-'} rlen=${s.routeLen ?? '-'}`);
+        say(`t=${t}s hits=${s.hits} tl=${s.timeLeft} p=(${s.px},${s.py}) a=${s.angle} v=${s.speed} onRoad=${s.onRoad} courier=(${s.cx},${s.cy}) a=${s.cAngle} ${s.cSpeed}/${s.cCruise} dest=${s.cDest} route=${s.cRouteLen} dist=${s.dist} mode=${s.mode} rt=${s.routeTarget || '-'} rlen=${s.routeLen ?? '-'} br=${s.dbg?.branch ?? '-'} drv=${s.dbg?.drive ?? '-'} thr=${s.dbg?.carThrottle ?? '-'} str=${s.dbg?.carSteer ?? '-'} held=[${(s.dbg?.heldKeys || []).join(',')}] inp=[${(s.dbg?.inputKeys || []).join(',')}] st=${s.dbg?.gameState ?? '-'} en=${s.dbg?.enabled ?? '-'} dCorn=${s.dbg?.dCorner ?? '-'} r0=${s.dbg?.route0 || '-'}`);
+        // B9 freeze tripwire: same rounded position 10s running.
+        const posKey = `${s.px},${s.py}`;
+        if (posKey === freezePos) freezeSecs += 1;
+        else { freezePos = posKey; freezeSecs = 0; }
+        if (freezeSecs > maxFreezeSecs) maxFreezeSecs = freezeSecs;
+        if (freezeSecs === 10 || (freezeSecs > 10 && freezeSecs % 30 === 0)) {
+          say(`  FREEZE? pos ${posKey} unchanged ${freezeSecs}s mode=${s.mode} br=${s.dbg?.branch} drv=${s.dbg?.drive} thr=${s.dbg?.carThrottle} str=${s.dbg?.carSteer} held=[${(s.dbg?.heldKeys || []).join(',')}] inp=[${(s.dbg?.inputKeys || []).join(',')}] st=${s.dbg?.gameState} en=${s.dbg?.enabled} angle=${s.angle} cDest=${s.dbg?.courier?.dest} cSpeed=${s.dbg?.courier?.speed} dCorn=${s.dbg?.dCorner} dCourier=${s.dbg?.dCourier} tl=${s.timeLeft} hits=${s.hits} stuckFor=${s.dbg?.stuckFor} revT=${s.dbg?.carReverseTimer} stuckT=${s.dbg?.carStuckTimer} dlg=${s.dbg?.dialogOpen}`);
+          say(`  FREEZE-DBG ${JSON.stringify(s.dbg)}`);
+        }
         await page.waitForTimeout(1000);
       }
     }
@@ -167,7 +187,7 @@ async function main() {
     server.close();
   }
   say(`\n== DIAG RESULT: ${outcome} ==`);
-  say(`minDist=${minDist === Infinity ? 'n/a' : minDist} offRoadSecs=${offRoadSecs} offRoadWhileCourierWithin250=${closeOffRoadSecs} restartsSeen=${restarts} consoleErrors=${errors.length}`);
+  say(`minDist=${minDist === Infinity ? 'n/a' : minDist} offRoadSecs=${offRoadSecs} offRoadWhileCourierWithin250=${closeOffRoadSecs} restartsSeen=${restarts} maxFreezeSecs=${maxFreezeSecs} consoleErrors=${errors.length}`);
   if (errors.length) for (const e of errors.slice(0, 5)) say(`  err: ${e}`);
   return outcome === 'M2-COMPLETE' ? 0 : 1;
 }

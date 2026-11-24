@@ -564,6 +564,13 @@ export function init(G) {
     chaseInterceptAt: 0,
     chaseStartAt: 0,
     chaseKey: '',
+    // B9 chase telemetry: the branch the driver took last frame and
+    // what it did with the throttle. publishDebug() copies these plus
+    // the raw car / input / courier state into G.chaseDebug every
+    // frame, so a probe can name the exact branch of a freeze instead
+    // of guessing from position alone.
+    dbgBranch: 'init',
+    dbgDrive: 'none',
   };
   G.autopilot = state;
   G.autopilotEnabled = false;
@@ -631,6 +638,7 @@ function driveToward(G, state, target, cruise, opts) {
     steerToward(keys, diff);
     // Crawl forward while rotating so the car keeps a little authority.
     if (speed < 25) keys.hold('KeyW');
+    state.dbgDrive = speed < 25 ? 'rotate-creep' : 'rotate';
     return true;
   }
 
@@ -661,12 +669,15 @@ function driveToward(G, state, target, cruise, opts) {
     keys.release('KeyW');
     if (speed > 60) keys.hold('KeyS');
     else keys.release('KeyS');
+    state.dbgDrive = 'brake';
   } else if (speed < cruise) {
     keys.hold('KeyW');
     keys.release('KeyS');
+    state.dbgDrive = 'throttle';
   } else {
     keys.release('KeyW');
     keys.release('KeyS');
+    state.dbgDrive = 'coast';
   }
   return true;
 }
@@ -792,6 +803,7 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
     keys.release('KeyD');
     keys.release('KeyW');
     keys.hold('KeyS');
+    state.dbgDrive = 'brake-straight';
     return;
   }
 
@@ -809,6 +821,7 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
       if (noseClear(G, p, heading)) keys.hold('KeyW');
       else keys.hold('KeyS');
     }
+    state.dbgDrive = faceOnly ? 'face-rotate' : 'rotate';
     return;
   }
   // Face mode: rotate in place toward the aim, never drive. The
@@ -817,6 +830,7 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
   if (faceOnly) {
     keys.release('KeyW');
     keys.release('KeyS');
+    state.dbgDrive = 'face-hold';
     return;
   }
   steerToward(keys, diff);
@@ -824,6 +838,7 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
   if (direct) {
     keys.hold('KeyW');
     keys.release('KeyS');
+    state.dbgDrive = 'direct';
     return;
   }
   // Road mode: brake only to a cap speed ahead of a sharp turn.
@@ -850,9 +865,11 @@ function steerAndThrottle(G, state, aim, cruise, speed, heading, opts) {
   if (mag > cap) {
     keys.release('KeyW');
     keys.hold('KeyS');
+    state.dbgDrive = 'brake-cap';
   } else {
     keys.hold('KeyW');
     keys.release('KeyS');
+    state.dbgDrive = 'throttle';
   }
 }
 
@@ -908,6 +925,7 @@ function brakeStraight(G, state) {
   keys.release('KeyD');
   keys.release('KeyW');
   keys.hold('KeyS');
+  state.dbgDrive = 'brake-straight';
   return true;
 }
 
@@ -970,7 +988,7 @@ function driveChase(G, state, courier, courierPos) {
         } else {
           target = nearestRoadPointOf(G, p);
         }
-        if (target) return driveToward(G, state, target, 120);
+        if (target) { mark(state, 'recovery', null); return driveToward(G, state, target, 120); }
       }
     }
   }
@@ -990,6 +1008,7 @@ function driveChase(G, state, courier, courierPos) {
     const aimPoint = nextWp || { x: courierPos.x, y: courierPos.y };
     const aimAngle = Math.atan2(aimPoint.y - p.y, aimPoint.x - p.x);
     if (Math.abs(angleDiff(aimAngle, heading)) > 1.0) {
+      mark(state, 'align-brake', null);
       return brakeStraight(G, state);
     }
   }
@@ -1007,6 +1026,7 @@ function driveChase(G, state, courier, courierPos) {
     // corner is what put the car into the west wall in the arc run.
     // When the line is blocked, fall through to the road-route ambush.
     if (!segmentBlocked(G, p, aimOpen)) {
+      mark(state, 'sprint', null);
       steerAndThrottle(G, state, aimOpen, playerTop, speed, heading, { direct: true });
       return true;
     }
@@ -1025,6 +1045,7 @@ function driveChase(G, state, courier, courierPos) {
     // Same open-line rule as the sprint: a crawling courier one road
     // over is not worth a charge through a building row.
     if (!segmentBlocked(G, p, aimSlow)) {
+      mark(state, 'slow-direct', null);
       steerAndThrottle(G, state, aimSlow, playerTop, speed, heading, { direct: true });
       return true;
     }
@@ -1054,6 +1075,7 @@ function driveChase(G, state, courier, courierPos) {
   if (((dCorner < 90 && dCourier < 500)
     || (dCourier < 200 && Math.abs(diffClose) < 1.2))
     && !segmentBlocked(G, p, aimClose)) {
+    mark(state, 'lunge', null);
     steerAndThrottle(G, state, aimClose, playerTop, speed, heading, { direct: true });
     return true;
   }
@@ -1062,6 +1084,7 @@ function driveChase(G, state, courier, courierPos) {
   // approach so the lunge starts with the nose already right. Rotate
   // in place, never drive — driving now would leave the corner.
   if (dCorner < 90 && dCourier >= 500) {
+    mark(state, 'face', null);
     steerAndThrottle(G, state, aimClose, playerTop, speed, heading, { face: true });
     return true;
   }
@@ -1071,6 +1094,7 @@ function driveChase(G, state, courier, courierPos) {
   // uses, so the route to a fixed corner is as stable as m1's drive
   // downtown — and when the courier picks a new corner the route
   // rebuilds exactly once for the new leg.
+  mark(state, 'corner-drive', null);
   return driveToward(G, state, corner, playerTop);
 }
 
@@ -1226,6 +1250,91 @@ function closeGarageMenu(G) {
 }
 
 // ---------------------------------------------------------------------------
+// B9 chase telemetry. mark() records which driveChase branch ran and
+// what it did with the throttle; publishDebug() copies those plus the
+// raw car / input / courier state into G.chaseDebug every frame, so a
+// probe sampling once a second can name the exact branch of a freeze:
+// the branch, the throttle/steer the car actually got, the keys the
+// autopilot thinks it holds vs the keys the input module sees (a
+// blur/desync leaves the autopilot holding keys the game never sees),
+// the courier's destination, and the mission timer. All reads are
+// defensive and the whole publish is wrapped, so telemetry can never
+// break the autopilot.
+// ---------------------------------------------------------------------------
+
+function mark(state, branch, drive) {
+  if (branch) state.dbgBranch = branch;
+  if (drive) state.dbgDrive = drive;
+}
+
+function publishDebug(G, state) {
+  try {
+    const p = playerPos(G);
+    const vehicle = playerVehicle(G);
+    const mission = currentMission(G);
+    const courier = readCourier(G, mission);
+    const cPos = courier ? posOf(courier) : null;
+    const world = G.world || {};
+    let onRoad = null;
+    try { onRoad = typeof world.isOnRoad === 'function' ? !!world.isOnRoad(p.x, p.y) : null; } catch { onRoad = null; }
+    const input = G.input || {};
+    let inputKeys = [];
+    try {
+      if (input.keys instanceof Set) inputKeys = [...input.keys];
+      else if (input.keys && typeof input.keys === 'object') {
+        inputKeys = Object.keys(input.keys).filter((k) => input.keys[k]);
+      }
+    } catch { inputKeys = []; }
+    const route0 = Array.isArray(state.route) && state.route.length > 0 ? state.route[0] : null;
+    const corner = cPos && typeof courier.destX === 'number' && typeof courier.destY === 'number'
+      ? { x: courier.destX, y: courier.destY } : null;
+    const live = liveObjective(G);
+    G.chaseDebug = {
+      t: +state.now.toFixed(1),
+      mode: state.mode || null,
+      branch: state.dbgBranch || state.mode || null,
+      drive: state.dbgDrive || null,
+      gameState: G.state || null,
+      enabled: !!G.autopilotEnabled,
+      px: Math.round(p.x), py: Math.round(p.y),
+      angle: +(headingOf(vehicle || G.player)).toFixed(2),
+      speed: Math.round(speedOf(vehicle || G.player)),
+      inCar: isDriving(G),
+      carTop: vehicle ? topSpeedOf(vehicle) : null,
+      carThrottle: vehicle ? (typeof vehicle.throttle === 'number' ? vehicle.throttle : null) : null,
+      carSteer: vehicle ? (typeof vehicle.steer === 'number' ? vehicle.steer : null) : null,
+      carBrake: vehicle ? !!vehicle.brake : null,
+      carReverseTimer: vehicle ? +(vehicle.reverseTimer || 0).toFixed(2) : null,
+      carStuckTimer: vehicle ? +(vehicle.stuckTimer || 0).toFixed(2) : null,
+      heldKeys: state.keys ? [...state.keys.held] : [],
+      inputKeys,
+      mission: missionId(mission) || null,
+      timeLeft: (G.missions && typeof G.missions.timeLeft === 'number') ? Math.round(G.missions.timeLeft) : null,
+      hits: (G.missions && G.missions.progress && typeof G.missions.progress.hits === 'number') ? G.missions.progress.hits : null,
+      dialogOpen: dialogOpen(G),
+      onRoad,
+      route0: route0 ? `${Math.round(route0.x)},${Math.round(route0.y)}` : null,
+      routeLen: Array.isArray(state.route) ? state.route.length : null,
+      routeTarget: state.routeTarget ? `${Math.round(state.routeTarget.x)},${Math.round(state.routeTarget.y)}` : null,
+      dCourier: cPos ? Math.round(dist(p.x, p.y, cPos.x, cPos.y)) : null,
+      dCorner: corner ? Math.round(dist(p.x, p.y, corner.x, corner.y)) : null,
+      corner: corner ? `${Math.round(corner.x)},${Math.round(corner.y)}` : null,
+      courier: cPos ? {
+        x: Math.round(cPos.x), y: Math.round(cPos.y),
+        speed: Math.round(speedOf(courier)), cruise: Math.round(courier.cruise || 0),
+        dest: (typeof courier.destX === 'number') ? `${Math.round(courier.destX)},${Math.round(courier.destY)}` : null,
+        routeLen: Array.isArray(courier.route) ? courier.route.length : null,
+      } : null,
+      stuckFor: +(state.now - (state.stuckSince || 0)).toFixed(1),
+      chaseStartAt: +(state.chaseStartAt || 0).toFixed(1),
+      objective: live ? `${Math.round(live.x)},${Math.round(live.y)}` : null,
+    };
+  } catch {
+    // Telemetry must never break the autopilot.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // update(G, dt) — one frame of autopilot. Runs BEFORE the dialog branch so
 // it can always press E to accept a mission, and before manual driving so
 // the autopilotDrove flag is set in time.
@@ -1237,6 +1346,16 @@ export function update(G, dt) {
   const now = state.now;
   const keys = state.keys;
   keys.releaseTaps();
+
+  // B9 telemetry: publish last frame's branch + the current raw state
+  // before this frame's logic runs, then default the branch to the
+  // current mode — the drive functions below overwrite it with the
+  // exact branch when they run. Publishing first means the debug
+  // object always reflects a completed frame, even when update()
+  // returns early (dialog / disabled / game over).
+  publishDebug(G, state);
+  state.dbgBranch = state.mode;
+  state.dbgDrive = 'none';
 
   // The flag starts cleared every frame; it is set again below only on
   // frames where the autopilot actually drives.
@@ -1421,6 +1540,7 @@ export function update(G, dt) {
           if (swap) {
             const swapPos = posOf(swap);
             if (swapPos) {
+              mark(state, 'chase-swap', null);
               driveToward(G, state, swapPos, 300);
               G.autopilotDrove = true;
               G.autopilot_drove = true;
@@ -1433,6 +1553,7 @@ export function update(G, dt) {
       if (!driving) {
         // On foot: find any car, else walk to the courier's nearest road
         // point — never walk at a moving target forever.
+        mark(state, 'chase-onfoot', 'walk');
         const swap = findSwapCandidate(G, true);
         if (swap) {
           const swapPos = posOf(swap);
