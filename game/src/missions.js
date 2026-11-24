@@ -382,7 +382,7 @@ function setupStage(G, stage) {
     case 'm8':
       if (stage === 0) {
         spawnEnemies([
-          { x: 1700, y: 1300 }, { x: 1900, y: 1300 }, { x: 1800, y: 1600 },
+          { x: 1700, y: 1300 }, { x: 1900, y: 1400 }, { x: 1800, y: 1600 },
         ]);
         spawnArenaPickups(1800, 1400);
         setObjective(1800, 1400, 'Clear the plaza — 3 enemies', 'shootout');
@@ -398,8 +398,8 @@ function setupStage(G, stage) {
     case 'm10':
       if (stage === 0) {
         spawnEnemies([
-          { x: 2500, y: 2100 }, { x: 2700, y: 2100 }, { x: 2600, y: 2300 },
-          { x: 2400, y: 2300 }, { x: 2700, y: 1900 },
+          { x: 2600, y: 2100 }, { x: 2700, y: 2200 }, { x: 2600, y: 2300 },
+          { x: 2400, y: 2300 }, { x: 2700, y: 1800 },
         ]);
         S.crates = [
           { x: 2500, y: 2200, weapon: 'smg', taken: false },
@@ -428,7 +428,7 @@ function setupStage(G, stage) {
         setHeat(G, Math.max(getHeat(G), 74));
         requestHeli(G, true);
         spawnEnemies([
-          { x: 1700, y: 900 }, { x: 1900, y: 900 }, { x: 1700, y: 1100 }, { x: 1900, y: 1100 },
+          { x: 1800, y: 900 }, { x: 1900, y: 1000 }, { x: 1700, y: 1100 }, { x: 1800, y: 1100 },
         ]);
         spawnArenaPickups(1800, 1000);
         setObjective(1800, 1000, 'Clear the bank — 4 enemies', 'shootout');
@@ -516,6 +516,7 @@ function damageEnemy(enemy, dmg) {
   if (enemy.hp <= 0) {
     enemy.hp = 0;
     enemy.alive = false;
+    enemy.dead = true; // combat.js reads .dead; keep both flags in sync
     S.progress.enemiesLeft = S.enemies.filter((e) => e.alive).length;
   }
   return true;
@@ -728,6 +729,21 @@ export function update(G, dt) {
 
   scanBullets(G);
   updatePickups(G);
+
+  // Sync with combat.js kills: combat resolves player bullets first
+  // (it runs earlier in the module order) and marks its kills with
+  // dead=true / hp=0, but this module counts enemiesLeft from .alive —
+  // so a combat kill never advanced a shootout stage until now.
+  if (S.enemies.length > 0) {
+    let changed = false;
+    for (const e of S.enemies) {
+      if (e.alive && (e.dead === true || (typeof e.hp === 'number' && e.hp <= 0))) {
+        e.alive = false;
+        changed = true;
+      }
+    }
+    if (changed) S.progress.enemiesLeft = S.enemies.filter((e) => e.alive).length;
+  }
 
   // m2 anti-freeze (§9.1b): on foot with no car in range, fall back to
   // walking to the courier's nearest road point — never chase the

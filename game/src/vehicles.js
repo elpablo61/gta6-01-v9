@@ -108,6 +108,7 @@ export function maybeRebuildRoute(car, G, tx, ty) {
 // Returns nothing; mutates the car. `targetSpeed` caps the speed.
 export function driveToward(car, G, dt, targetSpeed) {
   const world = G.world;
+  car._wallDamageCd = Math.max(0, (car._wallDamageCd || 0) - dt);
   let tx;
   let ty;
   if (car.route && car.routeIndex < car.route.length) {
@@ -251,9 +252,11 @@ export function driveToward(car, G, dt, targetSpeed) {
   car.y = res.y;
   if (res.hitX || res.hitY) {
     car.speed *= 0.6; // scrub speed on a wall hit
-    const now = (G.time && G.time.now) || 0;
-    if (now - (car.lastDamageTick || -10) >= 0.5) {
-      car.lastDamageTick = now;
+    // Wall damage ticks at most once per 0.5s. The old clock read
+    // G.time.now, which nothing ever sets, so the throttle never
+    // engaged (a 0 timestamp is falsy and re-armed every frame).
+    if ((car._wallDamageCd || 0) <= 0) {
+      car._wallDamageCd = 0.5;
       car.damage += 1;
       car.hp = Math.max(0, car.hp - 1);
     }
@@ -278,15 +281,79 @@ export function init(G) {
   return G.vehicles;
 }
 
+function num(v, dflt) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : dflt;
+}
+
+// Manual driving: integrate the intent player.js wrote on the car
+// (car.throttle -1..1, car.steer -1..1, car.brake bool). This is the
+// ONLY place a player-driven car moves. Negative throttle brakes while
+// moving forward and reverses only from (near-)standstill, so the
+// autopilot's S-key braking and a human's S-key reversing both behave.
+// Steering is radius-based like driveToward, with the same minimum
+// turn authority at low speed.
+function driveManual(car, G, dt) {
+  const world = G.world;
+  const step = typeof dt === 'number' && dt > 0 ? dt : 0.016;
+  car._wallDamageCd = Math.max(0, (car._wallDamageCd || 0) - step);
+  const throttle = num(car.throttle !== undefined ? car.throttle : car.inputThrottle, 0);
+  const steer = num(car.steer !== undefined ? car.steer : car.inputSteer, 0);
+  const brake = !!(car.brake || car.inputBrake);
+  const top = effectiveTopSpeed(car);
+
+  if (brake) {
+    // Strong deceleration toward a stop.
+    const dec = effectiveBrake(car) * step;
+    car.speed = car.speed > 0 ? Math.max(0, car.speed - dec)
+      : car.speed < 0 ? Math.min(0, car.speed + dec) : 0;
+  } else if (throttle > 0) {
+    car.speed = Math.min(top, car.speed + car.accel * step);
+  } else if (throttle < 0) {
+    if (car.speed > 30) car.speed = Math.max(0, car.speed - effectiveBrake(car) * step);
+    else car.speed = Math.max(-140, car.speed - car.accel * step);
+  } else {
+    // No input: coast down with drag.
+    const drag = 260 * step;
+    car.speed = car.speed > 0 ? Math.max(0, car.speed - drag)
+      : car.speed < 0 ? Math.min(0, car.speed + drag) : 0;
+  }
+
+  // Radius-based steering with minimum turn authority at low speed.
+  if (steer !== 0 && Math.abs(car.speed) > 1) {
+    const radius = effectiveTurnRadius(car);
+    const moving = Math.max(Math.abs(car.speed), 60);
+    const turnRate = Math.min(moving / radius, 2.4);
+    car.angle += steer * turnRate * step;
+  }
+
+  const dist = car.speed * step;
+  const res = moveWithCollision(world, car.x, car.y, Math.cos(car.angle) * dist, Math.sin(car.angle) * dist, 16);
+  car.x = res.x;
+  car.y = res.y;
+  if (res.hitX || res.hitY) {
+    car.speed *= 0.6; // scrub speed on a wall hit
+    if (car._wallDamageCd <= 0) {
+      car._wallDamageCd = 0.5;
+      car.damage = (car.damage || 0) + 1;
+      car.hp = Math.max(0, (car.hp || 100) - 1);
+    }
+  }
+  car.lastX = car.x;
+  car.lastY = car.y;
+}
+
 export function update(G, dt) {
   // Vehicles with no driver and no route sit parked; the traffic
-  // module drives traffic cars. Here we only tick damage/parked state
-  // and keep player-driven cars out of the way of this pass.
+  // module drives traffic cars. Player-driven cars are integrated here
+  // from the intent player.js wrote (car.throttle / steer / brake) —
+  // this is the single owner of player-car motion.
   const list = (G.vehicles && G.vehicles.list) || [];
   for (const car of list) {
     if (!car) continue;
     // Parked cars never move.
     if (car.parked) { car.speed = 0; continue; }
+    // The player car: drive it from manual intent.
+    if (car.driver === 'player') { driveManual(car, G, dt); continue; }
     // Traffic / courier / autopilot cars are driven by their owners
     // (traffic.js / missions / autopilot call driveToward directly).
   }

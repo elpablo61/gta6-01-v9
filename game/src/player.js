@@ -1,11 +1,13 @@
 // player.js — Rook on foot and behind the wheel (Crescent Bay).
 // Fresh from the prose spec §1. On foot: WASD / arrows move, mouse aim,
 // click shoot, Shift sprint. Driving: E enter / exit a car, steal a
-// parked car, carjack a traffic car (its driver flees). Manual driving
-// is SKIPPED on any frame the autopilot drove the car (guard flag on G:
-// autopilotDrove / autopilot_drove / autopilot.drove) — the autopilot
-// vs manual conflict froze cars in the v4 first attempt, so this guard
-// is load-bearing. ES module, vanilla JS, defensive throughout.
+// parked car, carjack a traffic car (its driver flees). Driving works by
+// intent only: this module writes car.throttle / car.steer / car.brake
+// from the keys (human keys and the autopilot's virtual keys alike) and
+// vehicles.js integrates the car — exactly one owner of car motion, so
+// the manual and autopilot drivers can never fight each other the way
+// the v4 first attempt's two integrators did. ES module, vanilla JS,
+// defensive throughout.
 
 const WORLD_SIZE = 3200;
 const WALK_SPEED = 230;
@@ -80,11 +82,37 @@ function mouseWorld(G, ctxW, ctxH) {
   };
 }
 
-function autopilotDrove(G) {
-  if (G.autopilotDrove === true || G.autopilot_drove === true) return true;
-  const a = G.autopilot || {};
-  if (a.drove === true || a.driving === true) return true;
-  return false;
+function updateDriving(G, p, dt) {
+  const car = p.car;
+  if (!car) return;
+  // Keep the player glued to the car.
+  p.x = car.x;
+  p.y = car.y;
+  p.angle = num(car.angle, p.angle || 0);
+  p.speed = num(car.speed, 0);
+
+  // Intent is ALWAYS written here — from the human's keys and from the
+  // autopilot's virtual keys alike (both flow through G.input). The old
+  // autopilot guard returned early here, so under the autopilot no
+  // intent was ever written and the car never moved; and no other module
+  // integrates a player car. vehicles.js is the single owner of car
+  // motion, so writing intent can never fight the autopilot: the
+  // autopilot only presses keys, it never integrates the car itself.
+  let throttle = 0;
+  if (keyDown(G, 'KeyW', 'ArrowUp', 'w', 'W', 'up')) throttle += 1;
+  if (keyDown(G, 'KeyS', 'ArrowDown', 's', 'S', 'down')) throttle -= 1;
+  let steer = 0;
+  if (keyDown(G, 'KeyA', 'ArrowLeft', 'a', 'A', 'left')) steer -= 1;
+  if (keyDown(G, 'KeyD', 'ArrowRight', 'd', 'D', 'right')) steer += 1;
+  const brake = keyDown(G, 'Space', ' ', 'space');
+  car.throttle = throttle;
+  car.inputThrottle = throttle;
+  car.steer = steer;
+  car.inputSteer = steer;
+  car.brake = brake;
+  car.inputBrake = brake;
+  car.manualInput = { throttle, steer, brake, dt };
+  p.drivingInput = { throttle, steer, brake };
 }
 
 function addHeat(G, amount) {
@@ -117,7 +145,11 @@ function moveWithCollision(G, p, dx, dy) {
 }
 
 function nearestCar(G, x, y, maxDist) {
-  const cars = G.vehicles || G.cars || [];
+  // Cars live in G.vehicles.list (G.vehicles itself is an array carrying
+  // that .list — see vehicles.js init); iterating the bare array finds
+  // nothing, which used to make E-enter-a-car silently never work.
+  const v = G.vehicles || G.cars || [];
+  const cars = Array.isArray(v && v.list) ? v.list : v;
   let best = null;
   let bestD = maxDist;
   if (!Array.isArray(cars)) return null;
@@ -239,40 +271,6 @@ function updateOnFoot(G, p, dt, viewW, viewH) {
   } else {
     if (G.input) G.input.shootHeld = false;
   }
-}
-
-function updateDriving(G, p, dt) {
-  const car = p.car;
-  if (!car) return;
-  // Keep the player glued to the car.
-  p.x = car.x;
-  p.y = car.y;
-  p.angle = num(car.angle, p.angle || 0);
-  p.speed = num(car.speed, 0);
-
-  // ★ AUTOPILOT GUARD: if the autopilot drove this frame, do NOT apply
-  // manual throttle / steering / braking — that conflict stalls the car.
-  if (autopilotDrove(G)) return;
-
-  // Manual input intent for the vehicle physics owner (vehicles.js):
-  // throttle -1..1, steer -1..1, brake flag. Player only writes intent;
-  // it never integrates the car itself, so there is exactly one owner
-  // of car motion.
-  let throttle = 0;
-  if (keyDown(G, 'KeyW', 'ArrowUp', 'w', 'W', 'up')) throttle += 1;
-  if (keyDown(G, 'KeyS', 'ArrowDown', 's', 'S', 'down')) throttle -= 1;
-  let steer = 0;
-  if (keyDown(G, 'KeyA', 'ArrowLeft', 'a', 'A', 'left')) steer -= 1;
-  if (keyDown(G, 'KeyD', 'ArrowRight', 'd', 'D', 'right')) steer += 1;
-  const brake = keyDown(G, 'Space', ' ', 'space');
-  car.throttle = throttle;
-  car.inputThrottle = throttle;
-  car.steer = steer;
-  car.inputSteer = steer;
-  car.brake = brake;
-  car.inputBrake = brake;
-  car.manualInput = { throttle, steer, brake, dt };
-  p.drivingInput = { throttle, steer, brake };
 }
 
 export function init(G) {
