@@ -560,9 +560,10 @@ export function init(G) {
     chaseRoute: [],
     chaseRouteDest: null,
     chaseRouteAt: 0,
+    chaseRouteFrom: null,
+    chaseRoutePrev: null,
     chaseIntercept: null,
     chaseInterceptAt: 0,
-    chaseInterceptKey: '',
     chaseStartAt: 0,
     chaseKey: '',
     // B9 chase telemetry: the branch the driver took last frame and
@@ -756,9 +757,10 @@ function chaseReset(state) {
     chaseRoute: [],
     chaseRouteDest: null,
     chaseRouteAt: 0,
+    chaseRouteFrom: null,
+    chaseRoutePrev: null,
     chaseIntercept: null,
     chaseInterceptAt: 0,
-    chaseInterceptKey: '',
     chaseStartAt: 0,
     chaseKey: '',
   };
@@ -781,11 +783,11 @@ function leadPoint(courier, courierPos, playerPos, playerTop) {
   };
 }
 
-// NOTE: the junction-scan intercept (pickIntercept) and the
-// block-reverse recovery (recoverToRoad) are gone: the v11 corner
-// ambush replaced the scan — the courier's destination corner is a
-// fixed point for a whole leg — and the v12 recovery drives back to
-// the road with the m1 driver instead of reversing in the block.
+// NOTE: the near-junction intercept (pickIntercept, B11) and the
+// fast chase driver (driveChaseFast) live just above driveChase; the
+// block-reverse recovery (recoverToRoad) is gone — the v12 recovery
+// drives back to the road with the m1 driver instead of reversing
+// in the block.
 
 // Is the point 55 units ahead of the car open ground? The m2 start
 // often leaves the car off-road inside a block, and creeping forward
@@ -969,163 +971,202 @@ function nearestRoadPointOf(G, p) {
   } catch { return null; }
 }
 
-// --- B10 near-junction intercept ---------------------------------------
+// --- Near-junction intercept (B11). ---------------------------------------
 //
-// The courier's route is a fixed polyline of junctions for a whole leg;
-// its destination corner is the END of that polyline, ~2500 units away.
-// Racing there loses every time: the courier laps a leg in ~13s (380
-// cruise, turn caps 170-250, and NO collision — updateCourier integrates
-// straight through block corners) while the player needs 30-60s through
-// ten stop-and-rotate junctions. Probe #1: 163s of corner-drive,
-// lunge/face never fired once, courier changed destination 23 times.
-// Instead, score every junction still on the courier's route by ETA:
-// the courier's time along its own route (its cruise, with a
-// turn-slowdown factor) against the player's time (road distance
-// estimated as 1.3x straight-line, at ~300 u/s average with the
-// moving-turn driver). The first junction the player can reach at
-// least a second before the courier is the ambush; if none qualifies,
-// the closest race (smallest ETA gap) is the fallback — the player at
-// least gets onto the courier's path, where the tail branch takes over.
-// The choice is cached for 2s of game time (or until the courier's
-// destination, route length or hit count changes) so the ambush point
-// is stable while the player drives to it.
-function pickIntercept(G, state, courier, courierPos, p, playerTop) {
-  const now = state.now;
-  const cruise = Math.max(60, (courier && courier.cruise) || 380);
-  const key = [
-    courier ? `${Math.round(courier.destX || 0)},${Math.round(courier.destY || 0)}` : '-',
-    Array.isArray(courier && courier.route) ? courier.route.length : 0,
-    courier ? (courier.hits || 0) : 0,
-  ].join('|');
-  const cached = state.chaseIntercept;
-  if (cached && state.chaseInterceptKey === key && now - (state.chaseInterceptAt || 0) < 2) {
-    return cached;
+// The B10 probe proved the far-corner ambush cannot win: the courier
+// runs one leg in ~13s while the player needs 30-60s to the same far
+// corner, so the player always arrives after the courier turned away.
+// The fix races the courier to the NEAREST junction on its own route
+// where the player can still get there first:
+//
+//   playerETA  = 1.3 x straight-line distance / 300 u/s (road distance
+//                is ~1.3x the straight line; 300 u/s is the effective
+//                average with junction turns, not the 520 top speed)
+//   courierETA = road distance along the courier's own route /
+//                (courier.cruise x 1.15) — the cruise is read live, so
+//                each ram hit (cruise x 0.55) opens more junctions
+//
+// Ambush = the junction nearest the player with playerETA + 1s <
+// courierETA. Fallback when none qualifies: race the nearest junction
+// by playerETA anyway — a race the player might win beats a far
+// corner it cannot. The car parks 90 units BEFORE the junction on
+// the arrival leg, nose toward the incoming courier, for a head-on
+// lunge on a straight road instead of a turn at the junction itself.
+//
+// The pick is cached 2s and recomputed when the courier's destination,
+// its next route waypoint, or its hit count changes — never because
+// the courier merely moved along its leg.
+
+// Road distance along the courier's route from its current position
+// to the route waypoint at index `upto` (inclusive).
+function courierRoadDist(courier, courierPos, upto) {
+  const route = courier.route;
+  let road = dist(courierPos.x, courierPos.y, route[0].x, route[0].y);
+  for (let j = 0; j < upto; j += 1) {
+    road += dist(route[j].x, route[j].y, route[j + 1].x, route[j + 1].y);
   }
-  // Polyline: courier position, remaining route waypoints, final dest.
-  const pts = [{ x: courierPos.x, y: courierPos.y }];
-  const route = (courier && Array.isArray(courier.route)) ? courier.route : [];
-  for (const wp of route) {
-    const point = posOf(wp);
-    if (!point) continue;
-    const last = pts[pts.length - 1];
-    if (dist(last.x, last.y, point.x, point.y) > 30) pts.push(point);
-  }
-  if (typeof courier.destX === 'number' && typeof courier.destY === 'number') {
-    const last = pts[pts.length - 1];
-    if (dist(last.x, last.y, courier.destX, courier.destY) > 30) {
-      pts.push({ x: courier.destX, y: courier.destY });
-    }
-  }
-  let pick = null;
-  let best = null;
-  let bestGap = Infinity;
-  let acc = 0;
-  for (let i = 1; i < pts.length; i += 1) {
-    const prev = pts[i - 1];
-    const wp = pts[i];
-    acc += dist(prev.x, prev.y, wp.x, wp.y);
-    const courierETA = (acc / cruise) * 1.15;
-    if (courierETA < 2) continue; // the courier is already there
-    const playerETA = (dist(p.x, p.y, wp.x, wp.y) * 1.3) / 300;
-    const gap = playerETA - courierETA;
-    const cand = { wp, courierETA, playerETA, prev };
-    if (gap < bestGap) { bestGap = gap; best = cand; }
-    if (!pick && playerETA + 1 < courierETA) pick = cand;
-  }
-  const chosen = pick || best;
-  let ambush;
-  if (chosen) {
-    // Park 90 units BEFORE the junction on the courier's incoming leg,
-    // facing the oncoming courier — a head-on meeting on a straight,
-    // not a turn at the junction itself.
-    const segLen = dist(chosen.prev.x, chosen.prev.y, chosen.wp.x, chosen.wp.y);
-    if (segLen > 150) {
-      const t = 90 / segLen;
-      ambush = {
-        x: chosen.wp.x + (chosen.prev.x - chosen.wp.x) * t,
-        y: chosen.wp.y + (chosen.prev.y - chosen.wp.y) * t,
-      };
-    } else {
-      ambush = { x: chosen.wp.x, y: chosen.wp.y };
-    }
-  } else {
-    // No route at all: aim at the courier's predicted position.
-    ambush = leadPoint(courier, courierPos, p, playerTop);
-  }
-  state.chaseIntercept = ambush;
-  state.chaseInterceptKey = key;
-  state.chaseInterceptAt = now;
-  return ambush;
+  return road;
 }
 
-// Fast chase driving: pure pursuit along the road route to a fixed
-// ambush point, turning while moving. The m1 driver (driveToward)
-// stops and rotates in place at every 90-degree junction — ~5s per
-// junction against a courier that turns at speed — so the chase never
-// uses it. This driver aims at a lookahead point on the route polyline
-// (~90-220 units ahead, further when faster), which starts the turn
-// BEFORE the junction, and caps speed ahead of sharp turns (180 for a
-// 90-degree turn, 110 for a hairpin, via steerAndThrottle's road mode):
-// at those speeds the car's 90-unit turning radius fits the 64-wide
-// road, so the arc lands on the outgoing road instead of overshooting
-// into the block and grinding to a crawl on wall hits (speed *= 0.6
-// per frame of contact). Returns false when there is no route to
-// follow, so the caller can fall back to the m1 driver.
-function driveChaseFast(G, state, target, cruise) {
+function pickIntercept(G, state, courier, courierPos, p, playerTop) {
+  const route = Array.isArray(courier.route) ? courier.route : [];
+  const destKey = `${courier.destX || 0},${courier.destY || 0}`
+    + `#${courier.hits || 0}`
+    + `#${route.length > 0 ? `${route[0].x},${route[0].y}` : 'none'}`;
+  if (state.chaseIntercept && state.chaseIntercept.key === destKey
+    && (state.now - (state.chaseInterceptAt || 0)) < 2) {
+    return state.chaseIntercept;
+  }
+  // No route (between legs): aim at where the courier will be.
+  if (route.length === 0) {
+    const park = leadPoint(courier, courierPos, p, playerTop);
+    const picked = { junction: null, park, approach: { x: courierPos.x, y: courierPos.y }, key: destKey };
+    state.chaseIntercept = picked;
+    state.chaseInterceptAt = state.now;
+    return picked;
+  }
+  const cruise = (typeof courier.cruise === 'number' && courier.cruise > 0) ? courier.cruise : 380;
+  const courierSpeed = cruise * 1.15;
+  let best = null; // nearest winnable junction, by player ETA
+  let bestPlayerEta = Infinity;
+  let nearest = null; // fallback: nearest junction by player ETA
+  let nearestPlayerEta = Infinity;
+  for (let i = 0; i < route.length; i += 1) {
+    const junction = posOf(route[i]);
+    if (!junction) continue;
+    const playerEta = (1.3 * dist(p.x, p.y, junction.x, junction.y)) / 300;
+    if (playerEta < nearestPlayerEta) {
+      nearestPlayerEta = playerEta;
+      nearest = { junction, playerEta, index: i };
+    }
+    const road = courierRoadDist(courier, courierPos, i);
+    const courierEta = road / courierSpeed;
+    if (playerEta + 1 < courierEta && playerEta < bestPlayerEta) {
+      bestPlayerEta = playerEta;
+      best = { junction, playerEta, courierEta, index: i };
+    }
+  }
+  const chosen = best || nearest;
+  if (!chosen) return null;
+  const junction = chosen.junction;
+  // Park 90 units before the junction on the arrival leg. The leg
+  // runs from the previous route waypoint (or the courier itself for
+  // the first waypoint) into the junction; on a short leg park at
+  // mid-leg so the car never sits past the leg start.
+  const prev = chosen.index === 0 ? courierPos : posOf(route[chosen.index - 1]);
+  let park = { x: junction.x, y: junction.y };
+  let approach = prev || { x: courierPos.x, y: courierPos.y };
+  if (prev) {
+    const legLen = dist(prev.x, prev.y, junction.x, junction.y);
+    if (legLen > 1) {
+      const along = Math.max(legLen * 0.5, legLen - 90);
+      const ux = (junction.x - prev.x) / legLen;
+      const uy = (junction.y - prev.y) / legLen;
+      park = { x: prev.x + ux * along, y: prev.y + uy * along };
+    }
+  }
+  const picked = { junction, park, approach, key: destKey };
+  state.chaseIntercept = picked;
+  state.chaseInterceptAt = state.now;
+  return picked;
+}
+
+// Fast chase driver: pure pursuit along the cached road route to a
+// fixed park point. It never stops to rotate: a lookahead point
+// 90-220 units ahead on the route (further the faster the car) keeps
+// the nose turning through junctions while the road-mode caps inside
+// steerAndThrottle (180 for a 90-degree turn, 110 for a hairpin)
+// bleed speed to a radius the 64-wide road can hold — the car turns
+// while moving instead of braking to a standstill at every junction.
+//
+// Waypoints drop only when proven passed: within the 42-unit radius,
+// or past the waypoint along its leg (on the leg line, heading
+// roughly along it, and still near it) — never merely because the
+// car is close to the NEXT waypoint, which is what used to cut the
+// diagonal across a building block.
+function driveChaseFast(G, state, target) {
   const p = playerPos(G);
   const vehicle = playerVehicle(G);
   const heading = headingOf(vehicle || G.player);
   const speed = speedOf(vehicle || G.player);
+  const playerTop = Math.max(200, topSpeedOf(vehicle));
 
-  const targetMoved = !state.routeTarget
-    || dist(target.x, target.y, state.routeTarget.x, state.routeTarget.y) > 40;
-  if (targetMoved || state.route.length === 0) {
-    state.route = computeRoute(G, p, target);
-    state.routeTarget = { x: target.x, y: target.y };
+  // Road route to the fixed park point, cached: rebuilt only when the
+  // park point moved or the route ran out — never because the target
+  // (the courier) moved, since the park point does not move with it.
+  const targetMoved = !state.chaseRouteDest
+    || dist(target.x, target.y, state.chaseRouteDest.x, state.chaseRouteDest.y) > 60;
+  if (targetMoved || state.chaseRoute.length === 0) {
+    state.chaseRoute = computeRoute(G, p, target);
+    state.chaseRouteDest = { x: target.x, y: target.y };
+    state.chaseRouteAt = state.now;
+    state.chaseRouteFrom = { x: p.x, y: p.y };
+    state.chaseRoutePrev = { x: p.x, y: p.y };
   }
-  // Drop reached waypoints, and the junction just left behind — but
-  // only when the car is provably ON the leg past it, heading along
-  // that leg: the router's first waypoint is the NEAREST junction,
-  // which mid-leg is often the one the car just passed. Dropping it
-  // blindly would aim the car diagonally at the NEXT junction across
-  // a block; the on-leg + heading checks below keep the drop honest.
-  while (state.route.length > 0) {
-    const wp = state.route[0];
-    const radius = state.route.length === 1 ? 60 : 42;
-    if (dist(p.x, p.y, wp.x, wp.y) < radius) { state.route.shift(); continue; }
-    if (state.route.length > 1) {
-      const a = state.route[0];
-      const b = state.route[1];
-      const legDir = Math.atan2(b.y - a.y, b.x - a.x);
-      const onLeg = (a.x === b.x)
-        ? Math.abs(p.x - a.x) < 40
-        : Math.abs(p.y - a.y) < 40;
-      const behind = (a.x - p.x) * Math.cos(heading) + (a.y - p.y) * Math.sin(heading) < 0;
-      if (onLeg && behind && Math.abs(angleDiff(legDir, heading)) < 0.6) {
-        state.route.shift(); continue;
+  const route = state.chaseRoute;
+
+  // Drop waypoints proven passed.
+  while (route.length > 0) {
+    const wp = route[0];
+    if (dist(p.x, p.y, wp.x, wp.y) < WAYPOINT_RADIUS) {
+      state.chaseRoutePrev = { x: wp.x, y: wp.y };
+      route.shift();
+      continue;
+    }
+    const prev = state.chaseRoutePrev || state.chaseRouteFrom || p;
+    const legDx = wp.x - prev.x;
+    const legDy = wp.y - prev.y;
+    const legLen = Math.hypot(legDx, legDy);
+    if (legLen < 1) {
+      state.chaseRoutePrev = { x: wp.x, y: wp.y };
+      route.shift();
+      continue;
+    }
+    const ux = legDx / legLen;
+    const uy = legDy / legLen;
+    const relX = p.x - wp.x;
+    const relY = p.y - wp.y;
+    const along = relX * ux + relY * uy;
+    const lateral = Math.abs(relX * uy - relY * ux);
+    const legAngle = Math.atan2(legDy, legDx);
+    const passed = along > 10 && lateral < 120
+      && Math.abs(angleDiff(heading, legAngle)) < 1.0
+      && dist(p.x, p.y, wp.x, wp.y) < 250;
+    if (!passed) break;
+    state.chaseRoutePrev = { x: wp.x, y: wp.y };
+    route.shift();
+  }
+
+  // Pure-pursuit lookahead along the route polyline: the aim point
+  // sits `look` units ahead of the car measured along the road, so
+  // the car steers into the turn before it arrives instead of at it.
+  const look = clamp(Math.abs(speed) * 0.5, 90, 220);
+  let aim = { x: target.x, y: target.y };
+  if (route.length > 0) {
+    let acc = dist(p.x, p.y, route[0].x, route[0].y);
+    if (acc >= look) {
+      aim = { x: route[0].x, y: route[0].y };
+    } else {
+      for (let i = 0; i < route.length - 1; i += 1) {
+        const seg = dist(route[i].x, route[i].y, route[i + 1].x, route[i + 1].y);
+        if (acc + seg >= look) {
+          const t = seg > 0 ? (look - acc) / seg : 0;
+          aim = {
+            x: route[i].x + (route[i + 1].x - route[i].x) * t,
+            y: route[i].y + (route[i + 1].y - route[i].y) * t,
+          };
+          break;
+        }
+        acc += seg;
+      }
+      if (aim.x === target.x && aim.y === target.y && acc < look) {
+        aim = { x: route[route.length - 1].x, y: route[route.length - 1].y };
       }
     }
-    break;
   }
-  if (state.route.length === 0) return false;
-  // Lookahead aim: walk the polyline [player, ...route] to L ahead.
-  const look = clamp(speed * 0.5, 90, 220);
-  let aim = state.route[state.route.length - 1];
-  let remaining = look;
-  let from = p;
-  for (const wp of state.route) {
-    const seg = dist(from.x, from.y, wp.x, wp.y);
-    if (seg >= remaining) {
-      const t = remaining / seg;
-      aim = { x: from.x + (wp.x - from.x) * t, y: from.y + (wp.y - from.y) * t };
-      remaining = 0;
-      break;
-    }
-    remaining -= seg;
-    from = wp;
-  }
-  const waypointDist = dist(p.x, p.y, state.route[0].x, state.route[0].y);
-  steerAndThrottle(G, state, aim, cruise, speed, heading, { route: state.route, waypointDist });
+  const wpDist = route.length > 0 ? dist(p.x, p.y, route[0].x, route[0].y) : 0;
+  steerAndThrottle(G, state, aim, playerTop, speed, heading,
+    { route, waypointDist: wpDist });
   return true;
 }
 
@@ -1185,15 +1226,6 @@ function driveChase(G, state, courier, courierPos) {
     }
   }
 
-  // B10: the old alignment gate is gone. It braked the car whenever its
-  // nose was >57 degrees off the cached road route's first waypoint —
-  // but that waypoint goes stale when the courier picks a new leg, so
-  // probe #1 watched it brake the car for ~3s while heading correctly
-  // (t=291-293). The same protection now lives inside
-  // steerAndThrottle (|diff| > 1.5 at speed > 60 brakes straight), which
-  // reads the live aim point instead of a stale waypoint, and every
-  // on-road branch below drives through it.
-
   // Opening sprint: in the first seconds the courier is still
   // accelerating from a standstill (it spawns 500 away), so the player
   // is genuinely faster and the meeting is right there. Drive straight
@@ -1232,35 +1264,30 @@ function driveChase(G, state, courier, courierPos) {
     }
   }
 
-  // B10 near-junction intercept (see pickIntercept): the ambush is the
-  // nearest junction on the courier's own route the player can reach
-  // before the courier, NOT the courier's far destination corner. The
-  // old far-corner race lost every leg (probe #1: 163s corner-drive,
-  // lunge/face never fired, courier changed destination 23 times).
-  const ambush = pickIntercept(G, state, courier, courierPos, p, playerTop);
-  const dAmbush = dist(p.x, p.y, ambush.x, ambush.y);
+  // Near-junction intercept (B11): race the courier to the nearest
+  // junction on its own route where the player can still arrive
+  // first, and park 90 units before it on the arrival leg — a
+  // head-on meeting on a straight road, not a turn at a far corner
+  // the courier left 30 seconds ago. The pick is cached (see
+  // pickIntercept); the road route to the fixed park point is
+  // cached inside driveChaseFast.
+  const intercept = pickIntercept(G, state, courier, courierPos, p, playerTop)
+    || { junction: null, park: leadPoint(courier, courierPos, p, playerTop), approach: courierPos };
+  const park = intercept.park;
+  const dPark = dist(p.x, p.y, park.x, park.y);
+
+  // Lunge: parked at the ambush point with the courier closing, or
+  // the courier close and roughly ahead, or — in escape mode — the
+  // courier anywhere within 800: the watchdog only fires after the
+  // plan has already failed, so a stalled wait is worse than a
+  // long direct charge. Steer straight at where it will be, foot
+  // flat. The courier slows to ~170 for the junction turn, so a
+  // parked car that lunges as it arrives meets it head-on — and
+  // lunging from 650 instead of 500 buys the closing distance the
+  // old range threw away.
   const aimClose = leadPoint(courier, courierPos, p, playerTop);
   const diffClose = angleDiff(Math.atan2(aimClose.y - p.y, aimClose.x - p.x), heading);
-
-  // Close pursuit: the courier is near and roughly ahead on an open
-  // line — drive straight at its predicted position instead of racing
-  // to a junction. This converts a missed ambush (the courier slipping
-  // past down the same road) into a tail-chase instead of another
-  // losing corner race.
-  if (dCourier < 600 && Math.abs(diffClose) < 0.9 && !segmentBlocked(G, p, aimClose)) {
-    mark(state, 'tail', null);
-    steerAndThrottle(G, state, aimClose, playerTop, speed, heading, { direct: true });
-    return true;
-  }
-
-  // Lunge: parked at the ambush point, or the courier close and roughly
-  // ahead — steer straight at where it will be, foot flat. The
-  // courier slows to ~170 for the junction turn, so a parked car that
-  // lunges as it arrives meets it head-on. Fires earlier than before
-  // (650 vs 500): from a standstill the car needs ~0.5s to reach ram
-  // speed, and the courier covers 650 units in ~1.7s. Escape mode
-  // (watchdog) lunges from anywhere — the wait itself was the problem.
-  if (((dAmbush < 90 && dCourier < 650)
+  if (((dPark < 90 && dCourier < 650)
     || (dCourier < 200 && Math.abs(diffClose) < 1.2)
     || (escaping && dCourier < 800))
     && !segmentBlocked(G, p, aimClose)) {
@@ -1269,25 +1296,36 @@ function driveChase(G, state, courier, courierPos) {
     return true;
   }
 
-  // Parked at the ambush point with the courier still far off: face its
-  // approach so the lunge starts with the nose already right. Rotate
-  // in place, never drive — driving now would leave the ambush point.
-  // Escape mode skips the wait: the watchdog only fires after 30s of
-  // no progress in face (a courier leg is 15-20s), so by then the
-  // wait itself is the problem and the car drives at the courier.
-  if (dAmbush < 90 && dCourier >= 650 && !escaping) {
+  // Tail: the courier is near, roughly ahead, and the line is open —
+  // no ambush is needed, chase it straight down. This is the branch
+  // the old chase never had: a courier one road over at 500 units
+  // with the nose already on it used to send the car the other way
+  // toward a far corner instead of down the open road at it.
+  if (dCourier < 600 && Math.abs(diffClose) < 0.9 && !segmentBlocked(G, p, aimClose)) {
+    mark(state, 'tail', null);
+    steerAndThrottle(G, state, aimClose, playerTop, speed, heading, { direct: true });
+    return true;
+  }
+
+  // Parked at the ambush point with the courier still far off: face
+  // its approach so the lunge starts with the nose already right.
+  // Rotate in place, never drive — driving now would leave the
+  // ambush point. Escape mode skips the wait: the watchdog only
+  // fires after 30s of no progress in face (a courier leg is
+  // 15-20s), so by then the wait itself is the problem and the car
+  // drives at the ambush point instead.
+  if (dPark < 90 && dCourier >= 650 && !escaping) {
     mark(state, 'face', null);
     steerAndThrottle(G, state, aimClose, playerTop, speed, heading, { face: true });
     return true;
   }
 
   // Otherwise drive the road to the ambush point with the fast chase
-  // driver (pure pursuit + turn speed caps — it turns while moving
-  // instead of stopping to rotate at every junction). If it has no
-  // route to follow, fall back to the m1 driver.
+  // driver: pure pursuit with a speed-scaled lookahead and capped
+  // turn speeds, turning while moving instead of stopping to rotate
+  // at every junction the way the m1 driver does.
   mark(state, 'intercept-drive', null);
-  if (driveChaseFast(G, state, ambush, playerTop)) return true;
-  return driveToward(G, state, ambush, playerTop);
+  return driveChaseFast(G, state, park);
 }
 
 // Walk toward a point on foot, following the road graph to the nearest
@@ -1643,13 +1681,12 @@ export function update(G, dt) {
   // --- Dialog accept runs BEFORE any car search (v4 lesson). --------------
   if (dialogOpen(G)) {
     setMode(G, 'dialog');
-    // B10: a dialog is modal — the car must not keep driving on keys
-    // held from the last drive. Probe #1 watched the m1 drive's W key
-    // carry the car ~516 units south off the road during the m2 offer
-    // dialog, so m2 started with the player rotating in place inside
-    // a block while the courier drove past 102 units away. Release
-    // everything and brake to a stop when driving; the accept below
-    // still fires (E is tapped after the release).
+    // Stop the car sliding through the dialog: the m1 drive holds W
+    // when the mission completes, and the old branch never released
+    // it — the car coasted ~500 units off-road during the m2 dialog
+    // while the player was still "talking". Release every key, and
+    // hold the brake while driving, so m2 starts on the road,
+    // stationary, nose where m1 left it.
     keys.releaseAll();
     if (driving) keys.hold('KeyS');
     if (now - state.lastDialogAt > 0.3) {
